@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+backend/.venv/
+.venv/
+
+# Env
+.env
+
+# Node
+node_modules/
+
+# Build output
+dist/
+frontend/dist/
+
+# Baileys auth state
+sidecar/auth_state/
+sidecar/baileys_auth/
+*.session
+
+# OS
+.DS_Store
