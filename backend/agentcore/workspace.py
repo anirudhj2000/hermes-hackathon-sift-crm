@@ -322,13 +322,13 @@ def append_run_summary(run) -> None:
         ts_text = ts.isoformat(timespec="seconds") if ts else "unknown time"
         stats_line = (
             f"fetched {stats.get('fetched', 0)}, kept {stats.get('kept', 0)}, "
-            f"contacts +{stats.get('contacts_created', 0)} created / "
-            f"{stats.get('contacts_updated', 0)} updated, "
-            f"interactions +{stats.get('interactions_created', 0)}"
+            f"rows +{stats.get('rows_created', 0)} created / "
+            f"{stats.get('rows_updated', 0)} updated"
         )
         block = (
             f"## Run {run.pk} — {run.status} — {ts_text}\n\n"
             f"- workflow: {wf.name} (id {wf.pk})\n"
+            f"- table: {stats.get('table') or '?'}\n"
             f"- stats: {stats_line}\n\n"
         )
         if not path.exists():

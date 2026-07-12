@@ -1,21 +1,23 @@
-"""Workflow DSL validation (see CONTRACTS.md).
+"""Workflow DSL v2 validation (see CONTRACTS.md).
 
 DSL shape:
-{ "name": str, "trigger": "manual",
+{ "name": str,
+  "trigger": "manual" | {"type": "interval", "minutes": int >= 1},
+  "table": "<slug of an existing DataTable>",
   "steps": [
     {"type": "fetch",   "source": "whatsapp"|"gmail",
      "since_days": int                      # relative window …
      | "from_date": "YYYY-MM-DD", "to_date": "YYYY-MM-DD",  # … or absolute range
      "chat_jids": [str, ...]?},             # whatsapp only: narrow within scoped chats
     {"type": "filter",  "instruction": str},
-    {"type": "extract", "fields": [str, ...]},
-    {"type": "upsert",  "dedupe_on": ["phone","email"], "tag": str|null}
+    {"type": "extract"},                     # NO fields — table columns ARE the schema
+    {"type": "upsert",  "dedupe_on": [str]?} # defaults to the table's dedupe_keys
   ] }
 
-Rules: >=1 fetch required; filter optional; extract + upsert required;
-unknown step types are errors. Fetch takes either since_days or a
-from_date/to_date range (at least one bound). WhatsApp fetches only ever
-see chats the user has scoped on the WhatsApp page.
+Rules: `table` is required and must resolve to an existing DataTable; >=1
+fetch required (source must be a declared connector); filter optional;
+extract + upsert required; unknown step types are errors. WhatsApp fetches
+only ever see chats the user has scoped on the WhatsApp page.
 """
 
 from datetime import date
@@ -28,7 +30,6 @@ def _parse_iso_date(value):
 
 VALID_SOURCES = {"whatsapp", "gmail"}  # fallback when the agent workspace is missing
 VALID_STEP_TYPES = {"fetch", "filter", "extract", "upsert"}
-VALID_DEDUPE_KEYS = {"phone", "email"}
 
 
 def _registry_sources() -> set[str]:
@@ -46,6 +47,32 @@ def _registry_sources() -> set[str]:
     return set(VALID_SOURCES)
 
 
+def _resolve_table(slug):
+    """Return (DataTable | None, error | None) for a table slug."""
+    from crm.models import DataTable  # lazy: keeps dsl importable standalone
+
+    try:
+        return DataTable.objects.get(slug=slug), None
+    except DataTable.DoesNotExist:
+        return None, f"'table' must be the slug of an existing table — no table {slug!r}"
+    except Exception as exc:  # DB unavailable etc.
+        return None, f"could not resolve table {slug!r}: {exc}"
+
+
+def validate_trigger(trigger) -> list[str]:
+    if trigger == "manual":
+        return []
+    if isinstance(trigger, dict):
+        errors = []
+        if trigger.get("type") != "interval":
+            errors.append("'trigger' object must have type \"interval\"")
+        minutes = trigger.get("minutes")
+        if not isinstance(minutes, int) or isinstance(minutes, bool) or minutes < 1:
+            errors.append("'trigger.minutes' must be an integer >= 1")
+        return errors
+    return ['\'trigger\' must be "manual" or {"type": "interval", "minutes": int >= 1}']
+
+
 def validate_dsl(dsl, valid_sources=None) -> list[str]:
     """Validate a workflow DSL dict. Returns a list of error strings (empty = valid)."""
     errors: list[str] = []
@@ -59,9 +86,16 @@ def validate_dsl(dsl, valid_sources=None) -> list[str]:
     if not isinstance(name, str) or not name.strip():
         errors.append("'name' must be a non-empty string")
 
-    trigger = dsl.get("trigger")
-    if trigger != "manual":
-        errors.append("'trigger' must be \"manual\"")
+    errors.extend(validate_trigger(dsl.get("trigger")))
+
+    table = None
+    table_slug = dsl.get("table")
+    if not isinstance(table_slug, str) or not table_slug.strip():
+        errors.append("'table' is required: the slug of the target table (create it first)")
+    else:
+        table, table_error = _resolve_table(table_slug)
+        if table_error:
+            errors.append(table_error)
 
     steps = dsl.get("steps")
     if not isinstance(steps, list) or not steps:
@@ -136,28 +170,28 @@ def validate_dsl(dsl, valid_sources=None) -> list[str]:
                 errors.append(f"{prefix}: filter 'instruction' must be a non-empty string")
 
         elif step_type == "extract":
-            fields = step.get("fields")
-            if (
-                not isinstance(fields, list)
-                or not fields
-                or not all(isinstance(f, str) and f.strip() for f in fields)
-            ):
-                errors.append(f"{prefix}: extract 'fields' must be a non-empty list of strings")
+            if "fields" in step:
+                errors.append(
+                    f"{prefix}: extract takes NO 'fields' — the target table's columns are the schema"
+                )
 
         elif step_type == "upsert":
             dedupe_on = step.get("dedupe_on")
-            if (
-                not isinstance(dedupe_on, list)
-                or not dedupe_on
-                or not all(k in VALID_DEDUPE_KEYS for k in dedupe_on)
-            ):
-                errors.append(
-                    f"{prefix}: upsert 'dedupe_on' must be a non-empty list drawn from"
-                    f" {sorted(VALID_DEDUPE_KEYS)}"
-                )
-            tag = step.get("tag")
-            if tag is not None and not isinstance(tag, str):
-                errors.append(f"{prefix}: upsert 'tag' must be a string or null")
+            if dedupe_on is not None:
+                if not isinstance(dedupe_on, list) or not all(
+                    isinstance(k, str) and k.strip() for k in dedupe_on
+                ):
+                    errors.append(
+                        f"{prefix}: upsert 'dedupe_on' must be a list of column names"
+                    )
+                elif table is not None:
+                    names = set(table.column_names())
+                    for key in dedupe_on:
+                        if key not in names:
+                            errors.append(
+                                f"{prefix}: upsert dedupe key {key!r} is not a column of"
+                                f" table {table.slug!r}"
+                            )
 
     if "fetch" not in seen_types:
         errors.append("workflow requires at least one 'fetch' step")

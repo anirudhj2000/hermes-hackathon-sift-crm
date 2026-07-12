@@ -6,7 +6,7 @@ HERMES_BASE_URL) when HERMES_API_KEY is set, else MockHermesClient.
 Both expose:
   chat(messages, tools) -> iterator of
       {"type": "text", "text": str} | {"type": "tool_call", "name": str, "args": dict}
-  extract(body, fields) -> dict
+  extract(body, columns, context) -> dict   (v2: typed against table columns)
   filter_relevant(bodies, instruction) -> list[bool]
 """
 
@@ -17,8 +17,6 @@ import re
 DEFAULT_BASE_URL = "https://inference.nousresearch.com/v1"
 DEFAULT_MODEL = "Hermes-4-405B"
 
-PHONE_RE = re.compile(r"\+?\d[\d\s().-]{7,}\d")
-EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 STOPWORDS = {
     "the", "and", "that", "with", "for", "from", "keep", "only", "messages",
     "message", "about", "which", "are", "ask", "asking", "mention", "mentions",
@@ -44,39 +42,14 @@ INTENT_KEYWORDS = [
 ]
 
 
-def heuristic_extract(body, fields):
-    out = {}
-    text = body or ""
-    lower = text.lower()
-    for field in fields:
-        f = field.lower()
-        if f == "phone":
-            m = PHONE_RE.search(text)
-            out[field] = re.sub(r"[\s().-]", "", m.group(0)) if m else None
-        elif f == "email":
-            m = EMAIL_RE.search(text)
-            out[field] = m.group(0) if m else None
-        elif f == "intent":
-            out[field] = next(
-                (name for name, kws in INTENT_KEYWORDS if any(k in lower for k in kws)),
-                None,
-            )
-        elif f == "name":
-            m = re.search(
-                r"(?:my name is|this is|i am|i'm)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
-                text,
-                re.IGNORECASE,
-            )
-            out[field] = m.group(1).title() if m else None
-        elif f == "company":
-            m = re.search(
-                r"(?:from|at|with)\s+([A-Z][A-Za-z0-9&.]+(?:\s+[A-Z][A-Za-z0-9&.]+)?)",
-                text,
-            )
-            out[field] = m.group(1) if m else None
-        else:
-            out[field] = None
-    return out
+def heuristic_extract(body, columns, context=None):
+    """Typed per-column heuristics (v2) — shared with the pipeline extractor."""
+    try:
+        from pipelines.extractor import heuristic_extract_typed
+
+        return heuristic_extract_typed(body, columns, context or {})
+    except Exception:
+        return {c.get("name"): None for c in (columns or []) if isinstance(c, dict)}
 
 
 def heuristic_filter(bodies, instruction):
@@ -133,12 +106,30 @@ class HermesClient:
                 args = {}
             yield {"type": "tool_call", "name": slot["name"], "args": args, "id": slot["id"]}
 
-    def extract(self, body, fields):
+    def extract(self, body, columns, context=None):
+        """One structured-output call typed against the table columns
+        (name/type/description/options). Falls back to heuristics."""
+        context = context or {}
+        spec = [
+            {
+                "name": c.get("name"),
+                "type": c.get("type"),
+                "description": c.get("description", ""),
+                **({"options": c["options"]} if c.get("options") else {}),
+            }
+            for c in (columns or [])
+            if isinstance(c, dict) and c.get("name")
+        ]
+        names = [c["name"] for c in spec]
         prompt = (
-            "Extract the following fields from the message below. "
-            "Respond with ONLY a JSON object whose keys are exactly the field names; "
-            "use null for anything not present.\n"
-            f"Fields: {json.dumps(fields)}\nMessage:\n{body}"
+            "Extract a typed row from the message below.\n"
+            "Respond with ONLY a JSON object whose keys are exactly the column "
+            "names; use null for anything not present. Respect each column's "
+            "type (number, date as YYYY-MM-DD, bool, enum must be one of the "
+            "options, otherwise text).\n"
+            f"Columns: {json.dumps(spec)}\n"
+            f"Message metadata: {json.dumps({k: v for k, v in context.items() if v})}\n"
+            f"Message:\n{body}"
         )
         try:
             resp = self._client.chat.completions.create(
@@ -149,9 +140,9 @@ class HermesClient:
             text = resp.choices[0].message.content or ""
             m = re.search(r"\{.*\}", text, re.DOTALL)
             data = json.loads(m.group(0)) if m else {}
-            return {f: data.get(f) for f in fields}
+            return {name: data.get(name) for name in names}
         except Exception:
-            return heuristic_extract(body, fields)
+            return heuristic_extract(body, columns, context)
 
     def filter_relevant(self, bodies, instruction):
         prompt = (
@@ -250,8 +241,8 @@ class MockHermesClient:
         # Final stage: closing summary, no more tool calls.
         yield from self._say(self._closing_summary(plan, created, runs))
 
-    def extract(self, body, fields):
-        return heuristic_extract(body, fields)
+    def extract(self, body, columns, context=None):
+        return heuristic_extract(body, columns, context)
 
     def filter_relevant(self, bodies, instruction):
         return heuristic_filter(bodies, instruction)

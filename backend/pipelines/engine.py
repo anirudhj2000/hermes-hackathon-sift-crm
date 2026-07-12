@@ -1,24 +1,23 @@
-"""Workflow engine (see CONTRACTS.md).
+"""Workflow engine (CONTRACTS v2).
 
 `start_run(workflow)` creates a WorkflowRun and interprets the workflow DSL
-in a background thread: fetch -> optional filter -> extract -> upsert.
+in a background thread: fetch -> optional filter -> extract (typed against
+the target table's columns) -> upsert into Records with provenance.
 Appends human-readable lines to run.log (saved after each step) and fills
 run.stats with exactly:
-{"fetched", "kept", "contacts_created", "contacts_updated", "interactions_created"}
+{"fetched", "kept", "rows_created", "rows_updated", "table"}
 """
 
 import re
 import threading
 import traceback
-from datetime import datetime, timezone as dt_timezone
 
 from django.db import close_old_connections
 from django.utils import timezone
 
-from crm.models import Contact, Interaction, Workflow, WorkflowRun
+from crm.models import DataTable, Record, Workflow, WorkflowRun
 
-from .extractor import extract as extract_fields
-from .extractor import normalize_phone
+from .extractor import extract as extract_record
 from .sources import gmail_composio, whatsapp
 
 SOURCES = {"whatsapp": whatsapp, "gmail": gmail_composio}
@@ -30,16 +29,6 @@ def start_run(workflow: Workflow) -> WorkflowRun:
     thread = threading.Thread(target=_execute, args=(run.pk,), daemon=True)
     thread.start()
     return run
-
-
-def _parse_ts(value) -> datetime:
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    if timezone.is_naive(dt):
-        dt = dt.replace(tzinfo=dt_timezone.utc)
-    return dt
 
 
 def _log(run: WorkflowRun, line: str):
@@ -66,70 +55,81 @@ def _filter_relevant(bodies: list[str], instruction: str) -> list[bool]:
     return _local_filter(bodies, instruction)
 
 
-def _upsert_contact(message, dedupe_on, tag, stats, created_ids, updated_ids):
-    """Match/merge a Contact per CONTRACTS: match by phone OR email (first
-    hit wins); merge fills null fields, appends tag if not present.
+def _context_for(msg: dict) -> dict:
+    return {
+        "source": msg.get("source"),
+        "external_id": msg.get("external_id"),
+        "sender_name": msg.get("sender_name"),
+        "chat_name": msg.get("chat_name"),
+        "phone": msg.get("phone"),
+        "email": msg.get("email"),
+        "subject": msg.get("subject"),
+        "ts": msg.get("ts"),
+        "direction": msg.get("direction"),
+    }
 
-    Any match against a pre-existing contact counts as a merge: the contact
-    is counted once in stats["contacts_updated"] even if no field changed."""
-    extracted = message.get("extracted", {})
-    phone = normalize_phone(extracted.get("phone") or message.get("phone"))
-    email = (extracted.get("email") or message.get("email") or "").strip() or None
-    company = extracted.get("company") or None
-    name = (
-        (extracted.get("name") or message.get("sender_name") or "").strip()
-        or phone
-        or email
-        or "Unknown"
-    )
 
-    contact = None
-    for key in dedupe_on:
-        if key == "phone" and phone:
-            contact = Contact.objects.filter(phone=phone).first()
-        elif key == "email" and email:
-            contact = Contact.objects.filter(email__iexact=email).first()
-        if contact:
-            break
+def _provenance(msg: dict) -> dict:
+    prov = {
+        "source": msg.get("source", "whatsapp"),
+        "external_id": msg.get("external_id", ""),
+    }
+    if msg.get("ts"):
+        prov["ts"] = str(msg["ts"])
+    return prov
 
-    if contact is None:
-        if not phone and not email:
-            return None  # nothing to dedupe on; skip contact creation
-        contact = Contact.objects.create(
-            name=name,
-            phone=phone,
-            email=email,
-            company=company,
-            tags=[tag] if tag else [],
-        )
-        stats["contacts_created"] += 1
-        created_ids.add(contact.pk)
-        return contact
 
-    # A message matched an existing contact: count the merge (once per contact
-    # per run), regardless of whether any field actually needs filling.
-    if contact.pk not in created_ids and contact.pk not in updated_ids:
-        updated_ids.add(contact.pk)
-        stats["contacts_updated"] += 1
+def _dedupe_signature(data: dict, dedupe_on: list) -> tuple:
+    """Str-compare signature across all dedupe key values."""
+    return tuple(str(data.get(key)) for key in dedupe_on)
 
+
+def _upsert_record(table, msg, dedupe_on, index, stats, created_ids, updated_ids):
+    """Match a Record where ALL dedupe key values are equal (str compare);
+    merge fills null/missing fields; provenance appended to `sources`.
+    Empty dedupe_on => always insert."""
+    data = msg.get("extracted") or {}
+    if all(v is None for v in data.values()):
+        return None  # nothing extracted; skip the row entirely
+    prov = _provenance(msg)
+
+    record = None
+    if dedupe_on:
+        if all(data.get(key) is None for key in dedupe_on):
+            return None  # nothing to dedupe on; avoid unmergeable duplicates
+        record = index.get(_dedupe_signature(data, dedupe_on))
+
+    if record is None:
+        record = Record.objects.create(table=table, data=data, sources=[prov])
+        stats["rows_created"] += 1
+        created_ids.add(record.pk)
+        if dedupe_on:
+            index[_dedupe_signature(data, dedupe_on)] = record
+        return record
+
+    # Merge: fill null/missing fields, append provenance.
     changed = False
-    if not contact.phone and phone:
-        contact.phone = phone
-        changed = True
-    if not contact.email and email:
-        contact.email = email
-        changed = True
-    if not contact.company and company:
-        contact.company = company
-        changed = True
-    tags = list(contact.tags or [])
-    if tag and tag not in tags:
-        tags.append(tag)
-        contact.tags = tags
+    merged = dict(record.data or {})
+    for key, value in data.items():
+        if value is not None and merged.get(key) in (None, ""):
+            merged[key] = value
+            changed = True
+    sources = list(record.sources or [])
+    if not any(
+        s.get("source") == prov["source"] and s.get("external_id") == prov["external_id"]
+        for s in sources
+        if isinstance(s, dict)
+    ):
+        sources.append(prov)
         changed = True
     if changed:
-        contact.save()
-    return contact
+        record.data = merged
+        record.sources = sources
+        record.save()
+    if record.pk not in created_ids and record.pk not in updated_ids:
+        updated_ids.add(record.pk)
+        stats["rows_updated"] += 1
+    return record
 
 
 def _execute(run_id: int):
@@ -137,15 +137,15 @@ def _execute(run_id: int):
     run = WorkflowRun.objects.get(pk=run_id)
     run.status = "running"
     run.started_at = timezone.now()
+    dsl = run.workflow.dsl or {}
     stats = {
         "fetched": 0,
         "kept": 0,
-        "contacts_created": 0,
-        "contacts_updated": 0,
-        "interactions_created": 0,
+        "rows_created": 0,
+        "rows_updated": 0,
+        "table": dsl.get("table"),
     }
     run.stats = stats
-    dsl = run.workflow.dsl or {}
     _log(run, f"Run {run.pk} started for workflow '{run.workflow.name}'.")
     run.save()
 
@@ -154,6 +154,11 @@ def _execute(run_id: int):
     updated_ids: set[int] = set()
 
     try:
+        table = DataTable.objects.filter(slug=dsl.get("table")).first()
+        if table is None:
+            raise ValueError(f"target table {dsl.get('table')!r} does not exist")
+        stats["table"] = table.slug
+
         for step in dsl.get("steps", []):
             step_type = step.get("type")
 
@@ -187,42 +192,33 @@ def _execute(run_id: int):
                 _log(run, f"filter: kept {len(messages)} of {before} messages ('{instruction}').")
 
             elif step_type == "extract":
-                fields = step["fields"]
                 for msg in messages:
-                    msg["extracted"] = extract_fields(
-                        msg.get("body", ""),
-                        fields,
-                        sender_name=msg.get("sender_name"),
-                        phone=msg.get("phone"),
-                        email=msg.get("email"),
+                    msg["extracted"] = extract_record(
+                        msg.get("body", ""), table.columns, _context_for(msg)
                     )
-                _log(run, f"extract: extracted {fields} from {len(messages)} messages.")
-
-            elif step_type == "upsert":
-                dedupe_on = step.get("dedupe_on", ["phone", "email"])
-                tag = step.get("tag")
-                for msg in messages:
-                    contact = _upsert_contact(msg, dedupe_on, tag, stats, created_ids, updated_ids)
-                    interaction, created = Interaction.objects.get_or_create(
-                        source=msg.get("source", "whatsapp"),
-                        external_id=msg["external_id"],
-                        defaults={
-                            "contact": contact,
-                            "direction": msg.get("direction", "in"),
-                            "body": msg.get("body", ""),
-                            "ts": _parse_ts(msg.get("ts") or timezone.now()),
-                            "extracted": msg.get("extracted", {}),
-                        },
-                    )
-                    if created:
-                        stats["interactions_created"] += 1
-                    elif interaction.contact_id is None and contact is not None:
-                        interaction.contact = contact
-                        interaction.save(update_fields=["contact"])
                 _log(
                     run,
-                    "upsert: contacts +{contacts_created} created, {contacts_updated} merged into existing;"
-                    " interactions +{interactions_created} created.".format(**stats),
+                    f"extract: typed {len(table.columns or [])} columns "
+                    f"({', '.join(table.column_names())}) from {len(messages)} messages.",
+                )
+
+            elif step_type == "upsert":
+                dedupe_on = step.get("dedupe_on")
+                if dedupe_on is None:
+                    dedupe_on = list(table.dedupe_keys or [])
+                # Pre-index existing rows by dedupe signature (str compare).
+                index = {}
+                if dedupe_on:
+                    for existing in table.records.all():
+                        index[_dedupe_signature(existing.data or {}, dedupe_on)] = existing
+                for msg in messages:
+                    _upsert_record(
+                        table, msg, dedupe_on, index, stats, created_ids, updated_ids
+                    )
+                _log(
+                    run,
+                    "upsert: rows +{rows_created} created, {rows_updated} updated"
+                    " into '{table}'.".format(**stats),
                 )
 
             else:
