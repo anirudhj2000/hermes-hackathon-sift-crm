@@ -1,0 +1,72 @@
+[
+  {
+    "jid": "919811223344@s.whatsapp.net",
+    "name": "Sneha Iyer",
+    "is_group": false
+  },
+  {
+    "jid": "919812345678@s.whatsapp.net",
+    "name": "Asha Rao",
+    "is_group": false
+  },
+  {
+    "jid": "919822334455@s.whatsapp.net",
+    "name": "Meera Joshi",
+    "is_group": false
+  },
+  {
+    "jid": "919833445566@s.whatsapp.net",
+    "name": "Arjun Malhotra",
+    "is_group": false
+  },
+  {
+    "jid": "919845012345@s.whatsapp.net",
+    "name": "Vikram Mehta",
+    "is_group": false
+  },
+  {
+    "jid": "919855667788@s.whatsapp.net",
+    "name": "Divya Krishnan",
+    "is_group": false
+  },
+  {
+    "jid": "919866778899@s.whatsapp.net",
+    "name": "Sanjay Patil",
+    "is_group": false
+  },
+  {
+    "jid": "919876543210@s.whatsapp.net",
+    "name": "Rohan Gupta",
+    "is_group": false
+  },
+  {
+    "jid": "919877889900@s.whatsapp.net",
+    "name": "Neha Sharma",
+    "is_group": false
+  },
+  {
+    "jid": "919888990011@s.whatsapp.net",
+    "name": "Farhan Sheikh",
+    "is_group": false
+  },
+  {
+    "jid": "919900112233@s.whatsapp.net",
+    "name": "Priya Nair",
+    "is_group": false
+  },
+  {
+    "jid": "919944556677@s.whatsapp.net",
+    "name": "Karthik Reddy",
+    "is_group": false
+  },
+  {
+    "jid": "120363041111222333@g.us",
+    "name": "Founders & SaaS Buyers India",
+    "is_group": true
+  },
+  {
+    "jid": "120363047777888999@g.us",
+    "name": "Zenlytics x Sift — Support",
+    "is_group": true
+  }
+]

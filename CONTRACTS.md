@@ -82,6 +82,37 @@ Upsert dedupe: match existing Contact by phone OR email (first hit wins); merge 
   - `filter_relevant(bodies: list[str], instruction: str) -> list[bool]`
 - MockHermesClient behavior: `chat` recognizes intent keywords (whatsapp/gmail/import/pricing) and emits a plausible plan narration + `create_workflow` tool call with a valid DSL + `run_workflow` after creation confirmation; `extract` uses regex/heuristics (phone/email patterns, name from sender, naive intent keyword); `filter_relevant` keyword-matches the instruction. Mock must produce a convincing demo transcript.
 
+## Agent Workspace (`workspace/` at repo root)
+The agent's entire world is a filesystem folder, `AGENT_WORKSPACE_ROOT` (env/setting, default `<repo>/workspace`):
+```
+workspace/
+  AGENT.md            agent identity & operating rules (read-only to the agent)
+  connectors/*.yaml   declarative connector registry (read-only)
+  schemas/workflow.schema.json   workflow document schema (read-only)
+  workflows/*.json    workflow documents — source of truth (agent-writable)
+  runs/*.md           per-workflow markdown run summaries (agent-writable)
+```
+
+### Connector registry (`workspace/connectors/*.yaml`)
+Each descriptor declares: `name`, `type` (`http-sidecar` | `composio` | `mcp`), `endpoint`/`actions`, an `auth` block (`kind`, `secret_env` — secrets themselves live outside the workspace), and `provides: [{capability, params, returns}]`. The format is MCP-ready: a `type: mcp` connector adds `server: {command | url}` (commented examples live in the shipped descriptors). `agentcore/workspace.py::load_registry()` parses these; `get_valid_sources()` returns the declared names. **Workflows may only fetch from declared connectors** — `pipelines/dsl.py::validate_dsl(dsl, valid_sources=None)` now validates fetch sources against the registry, falling back to `{whatsapp, gmail}` if the workspace is missing.
+
+### Jail (`agentcore/workspace.py::safe_path(rel)`)
+Resolves a workspace-relative path via realpath and requires the result to stay inside the root; absolute paths and `..` components raise. Nothing inside the workspace is denylisted (no secrets live there by construction).
+
+### Agent file tools (added to `agentcore/tools.py`; the original 4 tools are unchanged)
+- `list_files(path="")` → `{"path", "entries": [{name, type, size}]}`
+- `read_file(path)` → `{"path", "content"}`
+- `write_file(path, content)` → `{"path", "bytes"}` — **only `workflows/` and `runs/` are writable**; writes elsewhere return an error, jail escapes raise.
+
+### File-first workflows
+`create_workflow(name, dsl)` validates the DSL (including registry sources), writes `workspace/workflows/<slug>.json` conforming to `schemas/workflow.schema.json` — document shape `{id, version, created_by, chat_id, description, requires: [connector names], trigger: "manual", steps: [...]}` — then upserts the `crm.Workflow` row. The DB `dsl` JSON mirrors the file and records the backing file as `dsl["__file"] = "workflows/<slug>.json"` (no schema migration). `manage.py sync_workspace` scans `workspace/workflows/*.json`, validates each against the schema (hand-rolled checks in `agentcore.workspace.validate_workflow_doc`), and upserts DB rows so hand-dropped files appear in the UI.
+
+### Boot context
+`agentcore/workspace.py::boot_context()` assembles AGENT.md + a compact registry rendering (name, type, capabilities, auth status from `crm.Connection`) + the `workflows/` listing (filename + description), capped at ~4KB. It is appended to the system message for **every** `/api/agent/chat` request (real and mock clients alike). MockHermesClient consults the registry when picking sources but emits the same event flow as before.
+
+### Run summaries
+After each run finishes (done or error), the engine appends a short markdown block (timestamp from the run row + stats line) to `workspace/runs/<workflow-slug>.md`. Summary writing never breaks a run.
+
 ## Rules for builder agents
 - Work ONLY inside your assigned directory. `config/urls.py`, `config/settings.py`, and `crm/` are owned by Foundation/Integrator — do not edit them in Phase B.
 - Each Django app (`agentcore`, `pipelines`) ships its own `urls.py`; the integrator wires them into `config/urls.py`.

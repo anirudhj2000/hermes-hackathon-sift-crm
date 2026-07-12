@@ -15,10 +15,30 @@ SYSTEM_PROMPT = (
     "conversations from WhatsApp and Gmail, build workflows that extract and "
     "tag contacts, and answer questions about their CRM data. Use the "
     "available tools: create workflows with valid DSL, then run them. "
+    "WhatsApp is scope-first: workflows can only fetch chats/groups the user "
+    "has scoped on the WhatsApp page — call list_whatsapp_chats to see them, "
+    "and if it is empty ask the user to sync and scope chats there before "
+    "creating WhatsApp workflows. Fetch steps take since_days or a "
+    "from_date/to_date range, and optionally chat_jids from the scoped list. "
     "Narrate briefly what you are doing."
 )
 
 MAX_TURNS = 12
+
+
+def _system_message():
+    """SYSTEM_PROMPT grounded with the agent workspace boot context (AGENT.md,
+    connector registry, existing workflows). Injected for every chat request,
+    on both the real HermesClient and MockHermesClient paths."""
+    try:
+        from .workspace import boot_context
+
+        context = boot_context()
+    except Exception:
+        context = ""
+    if context:
+        return SYSTEM_PROMPT + "\n\n--- AGENT WORKSPACE ---\n" + context
+    return SYSTEM_PROMPT
 
 
 def _sse(event, data):
@@ -47,7 +67,7 @@ def agent_chat(request):
 def _stream(message, chat_id):
     client = get_client()
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": _system_message()},
         {"role": "user", "content": message},
     ]
 

@@ -21,32 +21,62 @@ def _parse_ts(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
-def _filter_since(messages, since_days):
-    cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+def _parse_date(value, end_of_day=False):
+    dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    if end_of_day and len(str(value)) <= 10:
+        dt = dt + timedelta(days=1) - timedelta(microseconds=1)
+    return dt
+
+
+def _filter_window(messages, since_days=None, from_date=None, to_date=None):
+    lo = None
+    hi = None
+    if since_days:
+        lo = datetime.now(timezone.utc) - timedelta(days=since_days)
+    if from_date:
+        lo = _parse_date(from_date)
+    if to_date:
+        hi = _parse_date(to_date, end_of_day=True)
     kept = []
     for msg in messages:
         try:
-            if _parse_ts(msg["ts"]) >= cutoff:
-                kept.append(msg)
+            ts = _parse_ts(msg["ts"])
         except (KeyError, ValueError):
             continue
+        if lo is not None and ts < lo:
+            continue
+        if hi is not None and ts > hi:
+            continue
+        kept.append(msg)
     return kept
 
 
-def _load_fixture(since_days):
+def _load_fixture(since_days=None, from_date=None, to_date=None):
     with open(FIXTURE_PATH) as f:
-        return _filter_since(json.load(f), since_days)
+        return _filter_window(json.load(f), since_days, from_date, to_date)
 
 
-def _fetch_via_composio(api_key: str, since_days: int) -> list[dict]:
+def _fetch_via_composio(api_key, since_days=None, from_date=None, to_date=None) -> list[dict]:
     """Fetch recent Gmail messages through Composio's REST API and map them
     to the gmail fixture shape. Seam only — requires a real COMPOSIO_API_KEY."""
+    if from_date or to_date:
+        parts = []
+        if from_date:
+            parts.append(f"after:{str(from_date)[:10].replace('-', '/')}")
+        if to_date:
+            hi = _parse_date(to_date, end_of_day=True) + timedelta(days=1)
+            parts.append(f"before:{hi.strftime('%Y/%m/%d')}")
+        query = " ".join(parts)
+    else:
+        query = f"newer_than:{since_days or 7}d"
     resp = httpx.post(
         f"{COMPOSIO_BASE_URL}/actions/GMAIL_FETCH_EMAILS/execute",
         headers={"x-api-key": api_key, "Content-Type": "application/json"},
         json={
             "input": {
-                "query": f"newer_than:{since_days}d",
+                "query": query,
                 "max_results": 100,
             }
         },
@@ -68,15 +98,15 @@ def _fetch_via_composio(api_key: str, since_days: int) -> list[dict]:
                 "direction": "in",
             }
         )
-    return _filter_since(messages, since_days)
+    return _filter_window(messages, since_days, from_date, to_date)
 
 
-def fetch(since_days: int) -> list[dict]:
-    """Return a list of gmail message dicts from the last `since_days` days."""
+def fetch(since_days=None, from_date=None, to_date=None, **_ignored) -> list[dict]:
+    """Return gmail message dicts from the window (relative or absolute)."""
     api_key = getattr(settings, "COMPOSIO_API_KEY", "")
     if api_key:
         try:
-            return _fetch_via_composio(api_key, since_days)
+            return _fetch_via_composio(api_key, since_days, from_date, to_date)
         except Exception:
             pass
-    return _load_fixture(since_days)
+    return _load_fixture(since_days, from_date, to_date)

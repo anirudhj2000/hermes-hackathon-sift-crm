@@ -24,7 +24,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "create_workflow",
-            "description": "Validate and save a workflow. The DSL must have a manual trigger and steps: >=1 fetch (whatsapp|gmail, since_days), optional filter (instruction), extract (fields), upsert (dedupe_on, tag).",
+            "description": "Validate and save a workflow. The DSL must have a manual trigger and steps: >=1 fetch (whatsapp|gmail, with either since_days or a from_date/to_date ISO date range, and optionally chat_jids to target specific scoped WhatsApp chats), optional filter (instruction), extract (fields), upsert (dedupe_on, tag). WhatsApp fetches only cover chats the user has scoped — check list_whatsapp_chats first.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -52,6 +52,57 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "list_whatsapp_chats",
+            "description": "List the WhatsApp chats and groups the user has scoped for CRM use. Only these are fetchable by workflows; pass their jids as chat_jids to narrow a fetch. Returns jid, name, is_group, message_count per chat.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_files",
+            "description": "List files in the agent workspace (AGENT.md, connectors/, schemas/, workflows/, runs/). Pass a workspace-relative directory path, or omit for the root.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Workspace-relative directory, e.g. 'workflows'. Empty = workspace root."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a file from the agent workspace (e.g. 'AGENT.md', 'connectors/whatsapp.yaml', 'workflows/my-flow.json').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Workspace-relative file path."},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Write a file inside the agent workspace. Only paths under workflows/ and runs/ are writable; AGENT.md, connectors/ and schemas/ are read-only.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Workspace-relative file path under workflows/ or runs/."},
+                    "content": {"type": "string", "description": "Full file content to write."},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "query_crm",
             "description": "Get simple CRM stats: contact/interaction counts, per-source breakdown, and recently used tags.",
             "parameters": {
@@ -72,6 +123,10 @@ def execute(name, args):
         "list_sources": lambda: list_sources(),
         "create_workflow": lambda: create_workflow(args.get("name", ""), args.get("dsl") or {}),
         "run_workflow": lambda: run_workflow(args.get("workflow_id")),
+        "list_whatsapp_chats": lambda: list_whatsapp_chats(),
+        "list_files": lambda: list_files(args.get("path", "")),
+        "read_file": lambda: read_file(args.get("path", "")),
+        "write_file": lambda: write_file(args.get("path", ""), args.get("content", "")),
         "query_crm": lambda: query_crm(args.get("question", "")),
     }
     handler = handlers.get(name)
@@ -139,6 +194,11 @@ def _local_validate_dsl(dsl):
 
 
 def create_workflow(name, dsl):
+    """File-first: validate the DSL (fetch sources must be connectors declared
+    in the workspace registry), write workspace/workflows/<slug>.json, then
+    upsert the DB Workflow row mirroring the file."""
+    from . import workspace
+
     try:
         from pipelines.dsl import validate_dsl
     except ImportError:
@@ -147,10 +207,69 @@ def create_workflow(name, dsl):
     if errors:
         return {"error": "invalid dsl", "details": errors}
 
-    from crm.models import Workflow
+    doc = workspace.workflow_doc_from_dsl(name, dsl, created_by="agent")
+    doc_errors = workspace.validate_workflow_doc(doc)
+    if doc_errors:
+        return {"error": "invalid workflow document", "details": doc_errors}
 
-    workflow = Workflow.objects.create(name=name, dsl=dsl)
-    return {"workflow_id": workflow.id, "name": workflow.name, "dsl": workflow.dsl}
+    rel_path = workspace.save_workflow_doc(doc)
+    workflow, _created = workspace.upsert_workflow_row(doc, rel_path)
+    return {
+        "workflow_id": workflow.id,
+        "name": workflow.name,
+        "dsl": workflow.dsl,
+        "file": rel_path,
+    }
+
+
+def list_files(path=""):
+    from .workspace import safe_path, workspace_root
+
+    target = safe_path(path)
+    if not target.exists():
+        return {"error": f"no such path in workspace: {path!r}"}
+    if target.is_file():
+        return {"path": path, "entries": [{"name": target.name, "type": "file", "size": target.stat().st_size}]}
+    root = workspace_root()
+    entries = []
+    for child in sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name)):
+        if child.name.startswith("."):
+            continue  # .gitkeep etc.
+        entries.append({
+            "name": str(child.relative_to(root)),
+            "type": "dir" if child.is_dir() else "file",
+            "size": child.stat().st_size if child.is_file() else None,
+        })
+    return {"path": path or ".", "entries": entries}
+
+
+READ_FILE_MAX_BYTES = 64 * 1024
+
+
+def read_file(path):
+    from .workspace import safe_path
+
+    target = safe_path(path)
+    if not target.is_file():
+        return {"error": f"no such file in workspace: {path!r}"}
+    data = target.read_bytes()[:READ_FILE_MAX_BYTES]
+    return {"path": path, "content": data.decode("utf-8", "replace")}
+
+
+def write_file(path, content):
+    from .workspace import is_agent_writable, safe_path
+
+    target = safe_path(path)  # jail check first: escapes always raise
+    if not is_agent_writable(path):
+        return {
+            "error": (
+                f"write denied: {path!r} — the agent may only write under "
+                "workflows/ and runs/ (AGENT.md, connectors/, schemas/ are read-only)"
+            )
+        }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content if isinstance(content, str) else str(content), encoding="utf-8")
+    return {"path": path, "bytes": len((content or "").encode("utf-8"))}
 
 
 def run_workflow(workflow_id):
@@ -167,6 +286,34 @@ def run_workflow(workflow_id):
         return {"error": f"workflow {workflow_id} not found"}
     run = start_run(workflow)
     return {"run_id": run.id}
+
+
+def list_whatsapp_chats():
+    from django.db.models import Count
+
+    from pipelines.models import WaChat
+
+    chats = (
+        WaChat.objects.filter(scoped=True)
+        .annotate(n_messages=Count("messages"))
+        .order_by("-last_message_at")
+    )
+    return {
+        "chats": [
+            {
+                "jid": c.jid,
+                "name": c.name or c.jid.split("@")[0],
+                "is_group": c.is_group,
+                "message_count": c.n_messages,
+            }
+            for c in chats
+        ],
+        "note": (
+            "Only scoped chats are listed; the user controls scope on the WhatsApp page."
+            if chats
+            else "No chats are scoped yet — ask the user to sync and scope chats on the WhatsApp page."
+        ),
+    }
 
 
 def query_crm(question):

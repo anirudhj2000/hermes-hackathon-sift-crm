@@ -183,6 +183,20 @@ class HermesClient:
 SOURCE_LABELS = {"whatsapp": "WhatsApp", "gmail": "Gmail"}
 
 
+def _registry_sources():
+    """Connector names from the agent workspace registry; falls back to the
+    pinned pair so mock mode keeps working if the workspace is missing."""
+    try:
+        from .workspace import get_valid_sources
+
+        sources = get_valid_sources()
+        if sources:
+            return sources
+    except Exception:
+        pass
+    return {"whatsapp", "gmail"}
+
+
 class MockHermesClient:
     """Scripted tool-calling chat. Stateless: the current stage is derived
     from the tool-result messages already present in `messages`, so the
@@ -274,13 +288,14 @@ class MockHermesClient:
     @staticmethod
     def _plan(user_msg):
         lower = user_msg.lower()
+        available = _registry_sources()  # only sources declared in the workspace registry
         sources = []
-        if "whatsapp" in lower:
+        if "whatsapp" in lower and "whatsapp" in available:
             sources.append("whatsapp")
-        if "gmail" in lower or "email" in lower or "mail" in lower:
+        if ("gmail" in lower or "email" in lower or "mail" in lower) and "gmail" in available:
             sources.append("gmail")
         if not sources:
-            sources = ["whatsapp"]
+            sources = ["whatsapp"] if "whatsapp" in available else sorted(available)[:1] or ["whatsapp"]
 
         m = re.search(r"last\s+(\d+)\s+days?", lower)
         if m:

@@ -1,0 +1,30 @@
+# Connector descriptor — WhatsApp via the Baileys sidecar.
+# The agent may only use capabilities declared under `provides`.
+name: whatsapp
+type: http-sidecar
+endpoint: ${SIDECAR_URL}          # default http://localhost:3001; unreachable => fixture mode
+actions:
+  history: GET /history           # fetch synced messages for scoped chats
+  qr: GET /qr                     # pairing QR (used by the Connections page, not workflows)
+auth:
+  kind: qr-pairing                # user pairs their phone; no stored credentials
+  secret_env: INGEST_SECRET       # shared secret for sidecar -> Django ingest
+provides:
+  - capability: fetch_history
+    params:
+      since_days: int
+    returns: IngestMessage[]
+
+# --- Example of a future MCP connector (format is MCP-ready) -----------------
+# name: telegram
+# type: mcp
+# server:
+#   command: "npx -y @example/telegram-mcp"   # or url: "https://mcp.example.com/telegram"
+# auth:
+#   kind: token
+#   secret_env: TELEGRAM_MCP_TOKEN
+# provides:
+#   - capability: fetch_history
+#     params:
+#       since_days: int
+#     returns: IngestMessage[]

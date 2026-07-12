@@ -1,0 +1,29 @@
+# Connector descriptor — Gmail via Composio.
+# The agent may only use capabilities declared under `provides`.
+name: gmail
+type: composio
+endpoint: https://backend.composio.dev
+actions:
+  history: GMAIL_FETCH_EMAILS     # Composio action used to pull recent mail
+auth:
+  kind: oauth
+  secret_env: COMPOSIO_API_KEY    # unset => fixture mode (backend/pipelines/fixtures/gmail.json)
+provides:
+  - capability: fetch_history
+    params:
+      since_days: int
+    returns: IngestMessage[]
+
+# --- Example of a future MCP connector (format is MCP-ready) -----------------
+# name: slack
+# type: mcp
+# server:
+#   url: "https://mcp.example.com/slack"      # or command: "npx -y @example/slack-mcp"
+# auth:
+#   kind: oauth
+#   secret_env: SLACK_MCP_TOKEN
+# provides:
+#   - capability: fetch_history
+#     params:
+#       since_days: int
+#     returns: IngestMessage[]

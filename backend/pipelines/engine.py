@@ -159,15 +159,24 @@ def _execute(run_id: int):
 
             if step_type == "fetch":
                 source_name = step["source"]
-                since_days = step["since_days"]
-                fetched = SOURCES[source_name].fetch(since_days)
+                params = {
+                    key: step[key]
+                    for key in ("since_days", "from_date", "to_date", "chat_jids")
+                    if step.get(key) is not None
+                }
+                fetched = SOURCES[source_name].fetch(**params)
                 for msg in fetched:
                     msg = dict(msg)
                     msg["source"] = source_name
                     messages.append(msg)
                 stats["fetched"] += len(fetched)
                 stats["kept"] = len(messages)
-                _log(run, f"fetch: {len(fetched)} messages from {source_name} (last {since_days} days).")
+                if "since_days" in params:
+                    window = f"last {params['since_days']} days"
+                else:
+                    window = f"{params.get('from_date', 'beginning')} → {params.get('to_date', 'now')}"
+                narrow = f", {len(params['chat_jids'])} chats" if params.get("chat_jids") else ""
+                _log(run, f"fetch: {len(fetched)} messages from {source_name} ({window}{narrow}).")
 
             elif step_type == "filter":
                 instruction = step["instruction"]
@@ -232,4 +241,15 @@ def _execute(run_id: int):
         run.stats = stats
         run.finished_at = timezone.now()
         run.save()
+        _write_run_summary(run)
         close_old_connections()
+
+
+def _write_run_summary(run: WorkflowRun):
+    """Append a short markdown summary to workspace/runs/<workflow-slug>.md."""
+    try:
+        from agentcore.workspace import append_run_summary
+
+        append_run_summary(run)
+    except Exception:
+        pass  # workspace bookkeeping must never break a run

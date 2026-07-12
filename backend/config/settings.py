@@ -143,3 +143,9 @@ HERMES_MODEL = os.environ.get("HERMES_MODEL", "Hermes-4-405B")
 COMPOSIO_API_KEY = os.environ.get("COMPOSIO_API_KEY", "")
 SIDECAR_URL = os.environ.get("SIDECAR_URL", "http://localhost:3001")
 INGEST_SECRET = os.environ.get("INGEST_SECRET", "dev-ingest-secret")
+
+# Agent workspace — the agent's filesystem world (connectors, schemas,
+# workflows, run summaries). Default: <repo>/workspace.
+AGENT_WORKSPACE_ROOT = os.environ.get(
+    "AGENT_WORKSPACE_ROOT", str(BASE_DIR.parent / "workspace")
+)

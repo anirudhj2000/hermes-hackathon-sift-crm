@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sift://schemas/workflow.schema.json",
+  "title": "Sift workflow document",
+  "description": "File-first workflow persisted in workspace/workflows/<slug>.json. Steps follow the pinned DSL in CONTRACTS.md; `requires` may only name connectors declared in workspace/connectors/.",
+  "type": "object",
+  "required": ["id", "version", "created_by", "description", "requires", "trigger", "steps"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "description": "Slug; also the filename stem."
+    },
+    "version": { "type": "integer", "minimum": 1 },
+    "created_by": {
+      "type": "string",
+      "description": "Who authored the document, e.g. \"agent\" or \"user\"."
+    },
+    "chat_id": {
+      "type": ["string", "null"],
+      "description": "Agent chat session that created this workflow, if any."
+    },
+    "description": { "type": "string", "minLength": 1 },
+    "requires": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "description": "Connector names this workflow depends on (must exist in connectors/)."
+    },
+    "trigger": { "const": "manual" },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["type", "source"],
+            "properties": {
+              "type": { "const": "fetch" },
+              "source": { "type": "string" },
+              "since_days": { "type": "integer", "minimum": 1 },
+              "from_date": { "type": "string", "format": "date" },
+              "to_date": { "type": "string", "format": "date" },
+              "chat_jids": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["type", "instruction"],
+            "properties": {
+              "type": { "const": "filter" },
+              "instruction": { "type": "string", "minLength": 1 }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["type", "fields"],
+            "properties": {
+              "type": { "const": "extract" },
+              "fields": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["type", "dedupe_on"],
+            "properties": {
+              "type": { "const": "upsert" },
+              "dedupe_on": {
+                "type": "array",
+                "items": { "enum": ["phone", "email"] },
+                "minItems": 1
+              },
+              "tag": { "type": ["string", "null"] }
+            }
+          }
+        ]
+      }
+    }
+  }
+}
