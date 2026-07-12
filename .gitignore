@@ -25,3 +25,4 @@ sidecar/baileys_auth/
 # eval run artifacts
 backend/evals/reports/*.json
 scratchpad-cf-deploy.sh
+.wrangler/
