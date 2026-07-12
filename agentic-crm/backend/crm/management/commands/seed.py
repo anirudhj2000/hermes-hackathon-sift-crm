@@ -10,7 +10,7 @@ NOW = datetime(2026, 7, 12, 9, 0, 0, tzinfo=timezone.utc)
 
 CONTACTS = [
     {"name": "Asha Rao", "phone": "+919812345678", "email": "asha.rao@zenithlabs.in", "company": "Zenith Labs", "tags": ["lead", "pricing"]},
-    {"name": "Vikram Mehta", "phone": "+919876501234", "email": "vikram@mehtatraders.com", "company": "Mehta Traders", "tags": ["customer"]},
+    {"name": "Vikram Malhotra", "phone": "+919876501234", "email": "vikram@malhotratraders.com", "company": "Malhotra Traders", "tags": ["customer"]},
     {"name": "Priya Krishnan", "phone": "+919845098450", "email": "priya.k@chennaisoft.io", "company": "ChennaiSoft", "tags": ["lead"]},
     {"name": "Rohan Deshpande", "phone": "+919920011223", "email": "rohan.d@punefintech.com", "company": "Pune Fintech", "tags": ["demo-requested"]},
     {"name": "Sarah Whitfield", "phone": "+14155550123", "email": "sarah@brightharbor.co", "company": "Bright Harbor", "tags": ["customer", "enterprise"]},
@@ -28,7 +28,7 @@ INTERACTIONS = [
     (1, "whatsapp", "in", 2, "Bhai, the export invoices feature is not working since yesterday. Please check."),
     (1, "whatsapp", "out", 2, "Sorry about that Vikram, we pushed a fix just now. Can you retry?"),
     (1, "whatsapp", "in", 2, "Working now. Thanks for the quick fix!"),
-    (1, "gmail", "out", 6, "Subject: Renewal confirmation\n\nHi Vikram, your annual plan for Mehta Traders renews on Aug 1. Let us know if you want to add seats."),
+    (1, "gmail", "out", 6, "Subject: Renewal confirmation\n\nHi Vikram, your annual plan for Malhotra Traders renews on Aug 1. Let us know if you want to add seats."),
     (2, "whatsapp", "in", 4, "Hello, I saw your product on LinkedIn. Do you have an API for bulk contact import?"),
     (2, "whatsapp", "out", 4, "Hi Priya! Yes, we have a REST API plus CSV import. Want me to send docs?"),
     (2, "whatsapp", "in", 4, "Yes please, send to priya.k@chennaisoft.io"),
