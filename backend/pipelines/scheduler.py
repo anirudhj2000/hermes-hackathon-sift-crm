@@ -8,6 +8,7 @@ last `minutes` gets a fresh start_run(). A tick never raises.
 """
 
 import logging
+import os
 import threading
 import time
 from datetime import timedelta
@@ -35,6 +36,9 @@ def start():
 def _loop():
     from django.db import close_old_connections
 
+    # Desync the tick across gunicorn workers (each starts its own scheduler);
+    # the pending/running check in _tick keeps duplicate runs out.
+    time.sleep(os.getpid() % 17)
     while True:
         time.sleep(TICK_SECONDS)
         try:
@@ -59,6 +63,29 @@ def _interval_minutes(workflow):
     return minutes
 
 
+STALE_MINUTES = 10  # a run older than this still pending/running is a zombie
+
+
+def _reap_zombies(now):
+    """Runs execute in daemon threads, so a server restart mid-run leaves the
+    run 'running' forever — which permanently blocks its workflow's interval
+    trigger (the one-at-a-time check). Mark them failed."""
+    from crm.models import WorkflowRun
+
+    stale = now - timedelta(minutes=STALE_MINUTES)
+    zombies = WorkflowRun.objects.filter(
+        status__in=("pending", "running"), started_at__lt=stale
+    )
+    for run in zombies:
+        run.status = "error"
+        run.log = (run.log or "") + (
+            "\nERROR: run orphaned (server restarted mid-run) — marked failed by scheduler."
+        )
+        run.finished_at = now
+        run.save()
+        logger.warning("scheduler: reaped zombie run %s", run.pk)
+
+
 def _tick():
     from django.utils import timezone
 
@@ -67,6 +94,7 @@ def _tick():
     from .engine import start_run
 
     now = timezone.now()
+    _reap_zombies(now)
     for workflow in Workflow.objects.all():
         minutes = _interval_minutes(workflow)
         if minutes is None:

@@ -13,6 +13,7 @@ learn from these files; everything you produce, you write back here.
 AGENT.md          — this file: who you are and how you operate (read-only)
 connectors/       — declarative descriptors of every data source you may use (read-only)
 schemas/          — JSON Schemas your documents must conform to (read-only)
+skills/           — how-to guides for building workflows and using each integration (read-only)
 workflows/        — workflow documents you create (writable)
 runs/             — human-readable summaries of completed runs (writable)
 ```
@@ -36,3 +37,9 @@ runs/             — human-readable summaries of completed runs (writable)
    workspace entirely; never ask for or record credentials in any file.
 5. **Validate, then persist.** A workflow's steps must pass DSL validation and
    every `requires` entry must name a connector that exists in `connectors/`.
+6. **Read the skill before you build.** Your boot context lists the guides in
+   `skills/`. Before designing a table or workflow, `read_file` the relevant one:
+   `skills/workflows.md` for any workflow, plus `skills/whatsapp.md` or
+   `skills/gmail.md` for the source(s) you'll fetch from. They carry the rules,
+   dedupe-key choices, and gotchas that keep a workflow from failing validation
+   or producing junk rows.

@@ -6,15 +6,19 @@ any error — reads the bundled fixture file, filtered by `since_days`.
 """
 
 import json
+import logging
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
 from django.conf import settings
 
+logger = logging.getLogger(__name__)
+
 FIXTURE_PATH = Path(__file__).resolve().parent.parent / "fixtures" / "gmail.json"
 
-COMPOSIO_BASE_URL = "https://backend.composio.dev/api/v2"
+COMPOSIO_BASE_URL = "https://backend.composio.dev/api/v3"
 
 
 def _parse_ts(value: str) -> datetime:
@@ -58,9 +62,28 @@ def _load_fixture(since_days=None, from_date=None, to_date=None):
         return _filter_window(json.load(f), since_days, from_date, to_date)
 
 
+def _composio_user_id():
+    """The user_id the OAuth connection was created under (crm connect flow)."""
+    try:
+        from crm.models import Connection
+
+        conn = Connection.objects.filter(source="gmail").first()
+        return ((conn and conn.meta) or {}).get("user_id") or "sift-demo"
+    except Exception:
+        return "sift-demo"
+
+
+def _split_sender(sender):
+    """'Name <a@b.c>' → (Name, a@b.c); plain address → (address, address)."""
+    m = re.match(r"^\s*\"?(.*?)\"?\s*<([^>]+)>\s*$", sender or "")
+    if m:
+        return (m.group(1) or m.group(2), m.group(2))
+    return (sender or "", sender or "")
+
+
 def _fetch_via_composio(api_key, since_days=None, from_date=None, to_date=None) -> list[dict]:
-    """Fetch recent Gmail messages through Composio's REST API and map them
-    to the gmail fixture shape. Seam only — requires a real COMPOSIO_API_KEY."""
+    """Fetch recent Gmail messages through Composio's v3 REST API and map
+    them to the gmail fixture shape. Requires an ACTIVE connected account."""
     if from_date or to_date:
         parts = []
         if from_date:
@@ -72,28 +95,31 @@ def _fetch_via_composio(api_key, since_days=None, from_date=None, to_date=None) 
     else:
         query = f"newer_than:{since_days or 7}d"
     resp = httpx.post(
-        f"{COMPOSIO_BASE_URL}/actions/GMAIL_FETCH_EMAILS/execute",
+        f"{COMPOSIO_BASE_URL}/tools/execute/GMAIL_FETCH_EMAILS",
         headers={"x-api-key": api_key, "Content-Type": "application/json"},
         json={
-            "input": {
-                "query": query,
-                "max_results": 100,
-            }
+            "user_id": _composio_user_id(),
+            "arguments": {"query": query, "max_results": 100},
         },
-        timeout=15.0,
+        timeout=30.0,
     )
     resp.raise_for_status()
     payload = resp.json()
-    raw = (payload.get("response_data") or payload.get("data") or {}).get("messages", [])
+    if payload.get("successful") is False:
+        raise RuntimeError(payload.get("error") or "composio execute failed")
+    raw = (payload.get("data") or {}).get("messages") or []
     messages = []
     for item in raw:
+        from agentcore.composio_tools import message_text
+
+        sender_name, sender_email = _split_sender(item.get("sender", ""))
         messages.append(
             {
                 "external_id": f"gm-{item.get('messageId') or item.get('id')}",
-                "sender_name": item.get("senderName") or item.get("sender", ""),
-                "email": item.get("senderEmail") or item.get("sender", ""),
+                "sender_name": item.get("senderName") or sender_name,
+                "email": item.get("senderEmail") or sender_email,
                 "subject": item.get("subject", ""),
-                "body": item.get("messageText") or item.get("snippet", ""),
+                "body": message_text(item),
                 "ts": item.get("messageTimestamp") or item.get("date", ""),
                 "direction": "in",
             }
@@ -103,10 +129,18 @@ def _fetch_via_composio(api_key, since_days=None, from_date=None, to_date=None) 
 
 def fetch(since_days=None, from_date=None, to_date=None, **_ignored) -> list[dict]:
     """Return gmail message dicts from the window (relative or absolute)."""
+    import os
+
     api_key = getattr(settings, "COMPOSIO_API_KEY", "")
     if api_key:
         try:
             return _fetch_via_composio(api_key, since_days, from_date, to_date)
-        except Exception:
-            pass
+        except Exception as exc:
+            # Fixture fallback is opt-in — real runs must fail loudly rather
+            # than silently filling tables with demo emails.
+            if os.environ.get("SIFT_MOCK_FALLBACK") != "1":
+                raise
+            logger.warning("composio gmail fetch failed (%s) — using fixture", exc)
+    elif os.environ.get("SIFT_MOCK_FALLBACK") != "1":
+        raise RuntimeError("gmail not configured — set COMPOSIO_API_KEY and connect gmail")
     return _load_fixture(since_days, from_date, to_date)

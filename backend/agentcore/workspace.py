@@ -98,6 +98,35 @@ def get_valid_sources() -> set[str]:
     return {c["name"] for c in load_registry()}
 
 
+def _skill_summary(path: Path) -> str:
+    """A skill file's one-line summary: the first '> ...' blockquote line,
+    falling back to its first '# ' heading."""
+    heading = ""
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if line.startswith("> "):
+                return line[2:].strip()
+            if not heading and line.startswith("# "):
+                heading = line[2:].strip()
+    except Exception:
+        pass
+    return heading or "(no summary)"
+
+
+def list_skills() -> list[dict]:
+    """Curated skill docs in skills/*.md — each {file, summary}. These teach the
+    agent how to build workflows and use each integration; loaded on demand via
+    read_file, indexed (not inlined) in the boot context."""
+    sdir = workspace_root() / "skills"
+    if not sdir.is_dir():
+        return []
+    skills = []
+    for path in sorted(sdir.glob("*.md")):
+        skills.append({"file": f"skills/{path.name}", "summary": _skill_summary(path)})
+    return skills
+
+
 def _capability_line(connector: dict) -> str:
     caps = []
     for cap in connector.get("provides") or []:
@@ -141,6 +170,15 @@ def boot_context() -> str:
     else:
         reg_lines.append("- (no connectors declared)")
     sections.append("\n".join(reg_lines))
+
+    skills = list_skills()
+    if skills:
+        skill_lines = [
+            "## Skills (read the relevant one with read_file BEFORE building)"
+        ]
+        for s in skills:
+            skill_lines.append(f"- {s['file']} — {s['summary']}")
+        sections.append("\n".join(skill_lines))
 
     table_lines = ["## Tables (existing data tables — target these in workflows)"]
     try:

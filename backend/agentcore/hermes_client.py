@@ -74,9 +74,14 @@ class HermesClient:
             messages=messages,
             tools=tools or None,
             stream=True,
+            stream_options={"include_usage": True},
         )
         pending = {}  # index -> accumulating tool call
+        usage = None
         for chunk in stream:
+            # The final usage chunk (include_usage) carries no choices.
+            if getattr(chunk, "usage", None):
+                usage = chunk.usage
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
@@ -91,6 +96,12 @@ class HermesClient:
                         slot["name"] += tc.function.name
                     if tc.function.arguments:
                         slot["args"] += tc.function.arguments
+        if usage is not None:
+            yield {
+                "type": "usage",
+                "input_tokens": getattr(usage, "prompt_tokens", None),
+                "output_tokens": getattr(usage, "completion_tokens", None),
+            }
         for _, slot in sorted(pending.items()):
             try:
                 args = json.loads(slot["args"] or "{}")

@@ -140,6 +140,16 @@ TOOL_SCHEMAS = [
     },
 ]
 
+# Composio-backed tools (Gmail actions over the user's connected account) are
+# only offered to the model when a COMPOSIO_API_KEY is configured.
+try:
+    from . import composio_tools
+
+    if composio_tools.available():
+        TOOL_SCHEMAS = TOOL_SCHEMAS + composio_tools.TOOL_SCHEMAS
+except Exception:
+    composio_tools = None
+
 
 def execute(name, args):
     args = args or {}
@@ -161,6 +171,11 @@ def execute(name, args):
     }
     handler = handlers.get(name)
     if handler is None:
+        if composio_tools and composio_tools.is_composio_tool(name):
+            try:
+                return composio_tools.execute(name, args)
+            except Exception as exc:
+                return {"error": str(exc)}
         return {"error": f"unknown tool: {name}"}
     try:
         return handler()

@@ -144,6 +144,13 @@ COMPOSIO_API_KEY = os.environ.get("COMPOSIO_API_KEY", "")
 SIDECAR_URL = os.environ.get("SIDECAR_URL", "http://localhost:3001")
 INGEST_SECRET = os.environ.get("INGEST_SECRET", "dev-ingest-secret")
 
+# Langfuse observability — the SDK reads LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY
+# / LANGFUSE_HOST from the environment (loaded from .env above). When the keys
+# are unset, agentcore.tracing no-ops so the offline demo keeps working.
+LANGFUSE_PUBLIC_KEY = os.environ.get("LANGFUSE_PUBLIC_KEY", "")
+LANGFUSE_SECRET_KEY = os.environ.get("LANGFUSE_SECRET_KEY", "")
+LANGFUSE_HOST = os.environ.get("LANGFUSE_HOST", "https://cloud.langfuse.com")
+
 # Agent workspace — the agent's filesystem world (connectors, schemas,
 # workflows, run summaries). Default: <repo>/workspace.
 AGENT_WORKSPACE_ROOT = os.environ.get(

@@ -42,9 +42,15 @@ def _chat_dict(chat, message_count=None):
 
 @require_GET
 def list_chats(request):
-    chats = WaChat.objects.annotate(n_messages=Count("messages")).order_by(
-        "-scoped", "-last_message_at"
-    )
+    from django.db.models import Q
+
+    # Directory shows only chats with live (post-pairing) events, plus
+    # anything already scoped. History-only chats stay hidden; pass ?all=1
+    # to inspect everything.
+    chats = WaChat.objects.annotate(n_messages=Count("messages"))
+    if request.GET.get("all") != "1":
+        chats = chats.filter(Q(scoped=True) | Q(meta__live_seen=True))
+    chats = chats.order_by("-scoped", "-last_message_at")
     # Bare list — the frontend consumes an array (or DRF-style {results: []}).
     return JsonResponse(
         [_chat_dict(c, message_count=c.n_messages) for c in chats], safe=False
@@ -98,12 +104,20 @@ def _sync_from_fixtures():
 @csrf_exempt
 @require_POST
 def sync_chats(request):
+    import os
+
     try:
         synced = _sync_from_sidecar()
         mode = "live"
     except Exception:
-        synced = _sync_from_fixtures()
-        mode = "mock"
+        # Fixture fallback is opt-in (SIFT_MOCK_FALLBACK=1) — real deployments
+        # must never silently seed demo chats.
+        if os.environ.get("SIFT_MOCK_FALLBACK") == "1":
+            synced = _sync_from_fixtures()
+            mode = "mock"
+        else:
+            synced = 0
+            mode = "offline"
 
     # Record when the WhatsApp layer first came online so the UI can show
     # "messages available since <date>".
@@ -119,6 +133,9 @@ def sync_chats(request):
     except Exception:
         pass  # bookkeeping only
 
+    from agentcore.connector_state import refresh as refresh_connector_state
+
+    refresh_connector_state("whatsapp")
     return JsonResponse({"synced": synced, "mode": mode})
 
 
@@ -136,6 +153,9 @@ def scope_chat(request, pk):
         return JsonResponse({"detail": "invalid JSON body"}, status=400)
     chat.scoped = scoped
     chat.save(update_fields=["scoped"])
+    from agentcore.connector_state import refresh as refresh_connector_state
+
+    refresh_connector_state("whatsapp")
     return JsonResponse(_chat_dict(chat))
 
 

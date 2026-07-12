@@ -50,19 +50,31 @@ def store_messages(raw_messages):
         chat = chats.get(chat_jid)
         if chat is None:
             is_group = bool(msg.get("is_group")) or chat_jid.endswith("@g.us")
+
+            # Display names must never be jids ("...@s.whatsapp.net"); a real
+            # name may later replace a placeholder, never the other way round.
+            def _clean(value):
+                value = (value or "").strip()
+                return "" if "@" in value else value
+
             # A DM's display name is the counterparty, not whoever sent this
             # particular message ("Me" for outbound).
-            fallback_name = "" if msg.get("direction") == "out" else (msg.get("sender_name") or "")
+            fallback_name = (
+                "" if msg.get("direction") == "out" else _clean(msg.get("sender_name"))
+            )
+            incoming_name = _clean(msg.get("chat_name")) or fallback_name
             chat, _ = WaChat.objects.get_or_create(
                 jid=chat_jid,
-                defaults={"name": msg.get("chat_name") or fallback_name, "is_group": is_group},
+                defaults={"name": incoming_name, "is_group": is_group},
             )
             update_fields = []
-            if msg.get("chat_name") and chat.name != msg["chat_name"]:
-                chat.name = msg["chat_name"]
+            sidecar_name = _clean(msg.get("chat_name"))
+            placeholder = not chat.name or "@" in chat.name
+            if sidecar_name and chat.name != sidecar_name:
+                chat.name = sidecar_name  # sidecar meta (subject/contact) wins
                 update_fields.append("name")
-            if not chat.name and fallback_name:
-                chat.name = fallback_name
+            elif placeholder and chat.name != (fallback_name or ""):
+                chat.name = fallback_name or ""  # upgrade or blank a jid name
                 update_fields.append("name")
             if is_group and not chat.is_group:
                 chat.is_group = True
@@ -70,6 +82,12 @@ def store_messages(raw_messages):
             if update_fields:
                 chat.save(update_fields=update_fields)
             chats[chat_jid] = chat
+
+        # Live events (post-pairing) mark the chat as active — only these
+        # chats appear in the UI directory; history-only chats stay hidden.
+        if msg.get("live") and not (chat.meta or {}).get("live_seen"):
+            chat.meta = {**(chat.meta or {}), "live_seen": True}
+            chat.save(update_fields=["meta"])
 
         _, created = WaMessage.objects.get_or_create(
             chat=chat,

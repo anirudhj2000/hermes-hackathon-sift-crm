@@ -236,7 +236,16 @@ def _execute(run_id: int):
     finally:
         run.stats = stats
         run.finished_at = timezone.now()
-        run.save()
+        try:
+            run.save()
+        except Exception:
+            # The DB may have restarted under this thread — reconnect and retry
+            # once so the run doesn't stay 'running' forever.
+            try:
+                close_old_connections()
+                run.save()
+            except Exception:
+                pass  # the scheduler's zombie reaper will mark it failed
         _write_run_summary(run)
         close_old_connections()
 

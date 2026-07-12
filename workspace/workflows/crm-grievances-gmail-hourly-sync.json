@@ -1,0 +1,36 @@
+{
+  "id": "crm-grievances-gmail-hourly-sync",
+  "version": 1,
+  "created_by": "agent",
+  "chat_id": null,
+  "description": "CRM Grievances \u2014 Gmail hourly sync",
+  "requires": [
+    "gmail"
+  ],
+  "trigger": {
+    "type": "interval",
+    "minutes": 60
+  },
+  "table": "crm-grievances",
+  "steps": [
+    {
+      "type": "fetch",
+      "source": "gmail",
+      "since_days": 1
+    },
+    {
+      "type": "filter",
+      "instruction": "Keep only Gmail messages from the inbox or sent mail that are grievance-related and were sent or received within the last hour relative to the workflow run time. A grievance-related email includes complaints, dissatisfaction, escalations, disputes, service/product issues, billing complaints, delivery issues, support failures, employee grievances, legal/compliance concerns, refund/replacement demands, or requests to resolve a problem. Exclude newsletters, promotions, routine notifications, receipts with no complaint, spam, and unrelated operational emails."
+    },
+    {
+      "type": "extract"
+    },
+    {
+      "type": "upsert",
+      "dedupe_on": [
+        "counterparty_email",
+        "subject"
+      ]
+    }
+  ]
+}

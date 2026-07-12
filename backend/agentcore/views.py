@@ -7,7 +7,7 @@ from django.http import JsonResponse, StreamingHttpResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
 
-from . import tools
+from . import tools, tracing
 from .hermes_client import get_client
 
 SYSTEM_PROMPT = (
@@ -69,83 +69,184 @@ def agent_chat(request):
     return response
 
 
+HISTORY_LIMIT = 20  # prior messages replayed into the prompt per request
+
+
+def _load_history(chat_id):
+    try:
+        from .models import ChatMessage
+
+        rows = ChatMessage.objects.filter(chat_id=chat_id).order_by(
+            "-created_at", "-id"
+        )[:HISTORY_LIMIT]
+        return [{"role": r.role, "content": r.content} for r in reversed(rows)]
+    except Exception:
+        return []  # history is bookkeeping; never break the stream
+
+
+def _save_turn(chat_id, user_text, assistant_text):
+    try:
+        from .models import ChatMessage
+
+        ChatMessage.objects.create(chat_id=chat_id, role="user", content=user_text)
+        if assistant_text.strip():
+            ChatMessage.objects.create(
+                chat_id=chat_id, role="assistant", content=assistant_text
+            )
+    except Exception:
+        pass  # history is bookkeeping; never break the stream
+
+
 def _stream(message, chat_id):
     client = get_client()
+    model = getattr(client, "model", "mock")
     messages = [
         {"role": "system", "content": _system_message()},
+        *_load_history(chat_id),
         {"role": "user", "content": message},
     ]
 
-    for _ in range(MAX_TURNS):
-        text_parts = []
-        tool_calls = []
+    # One Langfuse trace per chat request, keyed by chat_id so a multi-message
+    # conversation groups into one session. No-ops when Langfuse is disabled.
+    with tracing.trace("agent_chat", session_id=chat_id, input=message) as root:
+        final_parts = []
 
-        for event in client.chat(messages, tools.TOOL_SCHEMAS):
-            if event["type"] == "text":
-                text_parts.append(event["text"])
-                yield _sse("token", {"text": event["text"]})
-            elif event["type"] == "tool_call":
-                yield _sse("tool", {"name": event["name"], "args": event["args"]})
-                tool_calls.append(event)
+        for _ in range(MAX_TURNS):
+            text_parts = []
+            tool_calls = []
+            usage = None
 
-        if not tool_calls:
-            break  # assistant finished without calling a tool
-
-        assistant_msg = {
-            "role": "assistant",
-            "content": "".join(text_parts) or None,
-            "tool_calls": [],
-        }
-        executed = []
-        for call in tool_calls:
-            call_id = call.get("id") or f"call_{uuid.uuid4().hex[:8]}"
-            assistant_msg["tool_calls"].append({
-                "id": call_id,
-                "type": "function",
-                "function": {
-                    "name": call["name"],
-                    "arguments": json.dumps(call["args"]),
-                },
-            })
-            executed.append((call_id, call))
-        messages.append(assistant_msg)
-
-        for call_id, call in executed:
-            result = tools.execute(call["name"], call["args"])
-
-            if call["name"] == "create_table" and "table_id" in result:
-                _attach_table_chat_id(result["table_id"], chat_id)
-                yield _sse("table_created", {
-                    "table": {
-                        "id": result["table_id"],
-                        "slug": result["slug"],
-                        "name": result["name"],
-                        "columns": result["columns"],
-                        "dedupe_keys": result["dedupe_keys"],
-                    }
+            # One generation observation per model turn (tokens/cost attributed).
+            with tracing.observation("generation", "llm_turn", model=model) as gen:
+                gen.update(input=messages)
+                for event in client.chat(messages, tools.TOOL_SCHEMAS):
+                    if event["type"] == "text":
+                        text_parts.append(event["text"])
+                        yield _sse("token", {"text": event["text"]})
+                    elif event["type"] == "usage":
+                        usage = event
+                    elif event["type"] == "tool_call":
+                        yield _sse("tool", {"name": event["name"], "args": event["args"]})
+                        tool_calls.append(event)
+                gen.update(output={
+                    "text": "".join(text_parts),
+                    "tool_calls": [{"name": c["name"], "args": c["args"]} for c in tool_calls],
                 })
-            elif call["name"] == "create_workflow" and "workflow_id" in result:
-                _attach_chat_id(result["workflow_id"], chat_id)
-                yield _sse("workflow_created", {
-                    "workflow": {
-                        "id": result["workflow_id"],
-                        "name": result["name"],
-                        "dsl": result["dsl"],
-                    }
+                if usage:
+                    in_tok, out_tok = usage.get("input_tokens"), usage.get("output_tokens")
+                    gen.update(usage_details={"input": in_tok, "output": out_tok})
+                    cost = tracing.price(model, in_tok, out_tok)
+                    if cost:
+                        gen.update(cost_details=cost)
+
+            final_parts.append("".join(text_parts))
+
+            if not tool_calls:
+                break  # assistant finished without calling a tool
+
+            assistant_msg = {
+                "role": "assistant",
+                "content": "".join(text_parts) or None,
+                "tool_calls": [],
+            }
+            executed = []
+            for call in tool_calls:
+                call_id = call.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+                assistant_msg["tool_calls"].append({
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": call["name"],
+                        "arguments": json.dumps(call["args"]),
+                    },
                 })
-            elif call["name"] == "run_workflow" and "run_id" in result:
-                yield _sse("run_started", {
-                    "run_id": result["run_id"],
-                    "workflow_id": call["args"].get("workflow_id"),
+                executed.append((call_id, call))
+            messages.append(assistant_msg)
+
+            for call_id, call in executed:
+                # One span per tool call: args in, result out.
+                with tracing.observation("span", f"tool:{call['name']}", input=call["args"]) as tspan:
+                    result = tools.execute(call["name"], call["args"])
+                    tspan.update(output=result)
+
+                if call["name"] == "create_table" and "table_id" in result:
+                    _attach_table_chat_id(result["table_id"], chat_id)
+                    yield _sse("table_created", {
+                        "table": {
+                            "id": result["table_id"],
+                            "slug": result["slug"],
+                            "name": result["name"],
+                            "columns": result["columns"],
+                            "dedupe_keys": result["dedupe_keys"],
+                        }
+                    })
+                elif call["name"] == "create_workflow" and "workflow_id" in result:
+                    _attach_chat_id(result["workflow_id"], chat_id)
+                    yield _sse("workflow_created", {
+                        "workflow": {
+                            "id": result["workflow_id"],
+                            "name": result["name"],
+                            "dsl": result["dsl"],
+                        }
+                    })
+                elif call["name"] == "run_workflow" and "run_id" in result:
+                    yield _sse("run_started", {
+                        "run_id": result["run_id"],
+                        "workflow_id": call["args"].get("workflow_id"),
+                    })
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": json.dumps(result),
                 })
 
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call_id,
-                "content": json.dumps(result),
-            })
+        root.update(output="".join(final_parts))
 
+    _save_turn(chat_id, message, "\n\n".join(p for p in final_parts if p.strip()))
+    tracing.flush()
     yield _sse("done", {"chat_id": chat_id})
+
+
+def chat_list(request):
+    """GET /api/chats/ — conversations, newest first. Title = first user msg."""
+    from django.db.models import Count, Max
+
+    from .models import ChatMessage
+
+    rows = (
+        ChatMessage.objects.values("chat_id")
+        .annotate(message_count=Count("id"), updated_at=Max("created_at"))
+        .order_by("-updated_at")[:50]
+    )
+    out = []
+    for r in rows:
+        title = (
+            ChatMessage.objects.filter(chat_id=r["chat_id"], role="user")
+            .order_by("created_at", "id")
+            .values_list("content", flat=True)
+            .first()
+        ) or r["chat_id"]
+        out.append({
+            "chat_id": r["chat_id"],
+            "title": title[:60],
+            "message_count": r["message_count"],
+            "updated_at": r["updated_at"].isoformat(),
+        })
+    return JsonResponse(out, safe=False)
+
+
+def chat_messages(request, chat_id):
+    """GET /api/chats/<chat_id>/messages/ — full transcript, oldest first."""
+    from .models import ChatMessage
+
+    return JsonResponse(
+        [
+            {"role": m.role, "content": m.content, "created_at": m.created_at.isoformat()}
+            for m in ChatMessage.objects.filter(chat_id=chat_id)
+        ],
+        safe=False,
+    )
 
 
 def _attach_chat_id(workflow_id, chat_id):
