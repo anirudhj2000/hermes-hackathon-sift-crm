@@ -1,7 +1,12 @@
-// Thin fetch helpers for every endpoint in CONTRACTS.md.
+// Thin fetch helpers for every endpoint in CONTRACTS.md (v2).
+
+// Base URL for the API. Empty locally (Vite proxies /api → :8000); on
+// Cloudflare Pages set VITE_API_BASE to the Worker URL that fronts the
+// Django container, e.g. https://sift-api.<subdomain>.workers.dev
+const BASE = import.meta.env.VITE_API_BASE ?? ''
 
 async function request(path, options = {}) {
-  const res = await fetch(path, {
+  const res = await fetch(BASE + path, {
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
     ...options,
   })
@@ -18,14 +23,29 @@ async function request(path, options = {}) {
   return res.json()
 }
 
-// ---- Contacts / interactions ----
-export const listContacts = (search = '') =>
-  request(`/api/contacts/${search ? `?search=${encodeURIComponent(search)}` : ''}`)
+// ---- Tables / records ----
+export const listTables = () => request('/api/tables/')
 
-export const getContact = (id) => request(`/api/contacts/${id}/`)
+export const createTable = (name, columns, dedupeKeys) =>
+  request('/api/tables/', {
+    method: 'POST',
+    body: JSON.stringify({ name, columns, dedupe_keys: dedupeKeys }),
+  })
 
-export const listInteractions = (contactId) =>
-  request(`/api/interactions/?contact=${encodeURIComponent(contactId)}`)
+export const getTable = (slug) => request(`/api/tables/${encodeURIComponent(slug)}/`)
+
+export const listRecords = (slug, search = '') =>
+  request(
+    `/api/tables/${encodeURIComponent(slug)}/records/${
+      search ? `?search=${encodeURIComponent(search)}` : ''
+    }`,
+  )
+
+export const updateRecord = (slug, recordId, data) =>
+  request(`/api/tables/${encodeURIComponent(slug)}/records/${recordId}/`, {
+    method: 'PATCH',
+    body: JSON.stringify({ data }),
+  })
 
 // ---- Workflows / runs ----
 export const listWorkflows = () => request('/api/workflows/')
@@ -33,26 +53,53 @@ export const listWorkflows = () => request('/api/workflows/')
 export const createWorkflow = (name, dsl) =>
   request('/api/workflows/', { method: 'POST', body: JSON.stringify({ name, dsl }) })
 
+export const updateWorkflow = (id, patch) =>
+  request(`/api/workflows/${id}/`, { method: 'PATCH', body: JSON.stringify(patch) })
+
 export const runWorkflow = (id) => request(`/api/workflows/${id}/run/`, { method: 'POST' })
 
 export const listRuns = () => request('/api/runs/')
 
 export const getRun = (id) => request(`/api/runs/${id}/`)
 
+// ---- Chats (history) ----
+export const listChats = () => request('/api/chats/')
+
+export const getChatMessages = (chatId) =>
+  request(`/api/chats/${encodeURIComponent(chatId)}/messages/`)
+
+// ---- Evals ----
+export const getEvals = () => request('/api/evals/')
+
 // ---- Connections ----
 export const listConnections = () => request('/api/connections/')
 
-export const pairWhatsapp = () =>
-  request('/api/connections/whatsapp/pair/', { method: 'POST' })
+export const pairWhatsapp = (phone) =>
+  request('/api/connections/whatsapp/pair/', {
+    method: 'POST',
+    body: JSON.stringify(phone ? { phone } : {}),
+  })
 
 export const connectGmail = () =>
   request('/api/connections/gmail/connect/', { method: 'POST' })
 
+export const disconnectSource = (source) =>
+  request(`/api/connections/${source}/disconnect/`, { method: 'POST' })
+
+// ---- WhatsApp chat scoping ----
+export const listWhatsappChats = () => request('/api/whatsapp/chats/')
+
+export const scopeWhatsappChat = (id, scoped) =>
+  request(`/api/whatsapp/chats/${id}/scope/`, {
+    method: 'POST',
+    body: JSON.stringify({ scoped }),
+  })
+
 // ---- Agent chat (SSE over fetch) ----
 // streamChat(message, chatId, onEvent)
-// onEvent({type: 'token'|'tool'|'workflow_created'|'run_started'|'done', data})
+// onEvent({type: 'token'|'tool'|'table_created'|'workflow_created'|'run_started'|'done', data})
 export async function streamChat(message, chatId, onEvent) {
-  const res = await fetch('/api/agent/chat', {
+  const res = await fetch(BASE + '/api/agent/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message, chat_id: chatId || null }),

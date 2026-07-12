@@ -22,3 +22,23 @@ export function prettyDsl(dsl) {
     return String(dsl)
   }
 }
+
+// "fetch → filter → extract → upsert" from a v2 DSL.
+export function stepChain(dsl) {
+  const steps = dsl && Array.isArray(dsl.steps) ? dsl.steps : []
+  return steps.map((s) => s && s.type).filter(Boolean)
+}
+
+// Zero-padded run number for blueprint metadata lines: 42 → "0042".
+export function padRun(n) {
+  return String(n ?? 0).padStart(4, '0')
+}
+
+// One-per-card blueprint metadata line from a v2 run's stats — only TRUE values.
+export function runFlourish(run) {
+  if (!run) return null
+  const s = run.stats || {}
+  const rows = (s.rows_created ?? 0) + (s.rows_updated ?? 0)
+  if (s.fetched == null && !rows) return `RUN ${padRun(run.id)} · ${String(run.status || '').toUpperCase()}`
+  return `RUN ${padRun(run.id)} · ${s.fetched ?? 0} MSGS → ${rows} ROWS`
+}
