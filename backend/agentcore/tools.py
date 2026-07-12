@@ -13,6 +13,46 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "create_table",
+            "description": "Design and save a new data table. columns is a list of {name, type: text|number|date|bool|enum, description, options? (required for enum)}; dedupe_keys is a subset of column names used to merge rows from repeated messages.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Human-readable table name, e.g. 'Orders'."},
+                    "columns": {"type": "array", "description": "Column specs: {name, type, description, options?}.", "items": {"type": "object"}},
+                    "dedupe_keys": {"type": "array", "description": "Column names that identify a row (subset of columns).", "items": {"type": "string"}},
+                },
+                "required": ["name", "columns"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_tables",
+            "description": "List the existing data tables with their columns, dedupe keys, and row counts.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_records",
+            "description": "Query rows from a table by slug, with optional exact-match filters on data keys.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "table": {"type": "string", "description": "Table slug."},
+                    "filters": {"type": "object", "description": "Exact-match filters on column values, e.g. {\"paid\": true}."},
+                    "limit": {"type": "integer", "description": "Max rows to return (default 20)."},
+                },
+                "required": ["table"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_sources",
             "description": "List available data sources (whatsapp, gmail) with their connection status and whether they run in live or mock mode.",
             "parameters": {"type": "object", "properties": {}, "required": []},
@@ -22,7 +62,7 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "create_workflow",
-            "description": "Validate and save a workflow. The DSL must have a manual trigger and steps: >=1 fetch (whatsapp|gmail, with either since_days or a from_date/to_date ISO date range, and optionally chat_jids to target specific scoped WhatsApp chats), optional filter (instruction), extract (fields), upsert (dedupe_on, tag). WhatsApp fetches only cover chats the user has scoped — check list_whatsapp_chats first.",
+            "description": "Validate and save a workflow. The DSL needs: trigger ('manual' or {type: 'interval', minutes >= 1}), table (slug of an existing table — create it with create_table first), and steps: >=1 fetch (whatsapp|gmail, with either since_days or a from_date/to_date ISO date range, and optionally chat_jids to target specific scoped WhatsApp chats), optional filter (instruction), extract (NO fields — the table's columns are the schema), upsert (dedupe_on optional, defaults to the table's dedupe_keys). WhatsApp fetches only cover chats the user has scoped — check list_whatsapp_chats first.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -104,6 +144,13 @@ TOOL_SCHEMAS = [
 def execute(name, args):
     args = args or {}
     handlers = {
+        "create_table": lambda: create_table(
+            args.get("name", ""), args.get("columns") or [], args.get("dedupe_keys") or []
+        ),
+        "list_tables": lambda: list_tables(),
+        "query_records": lambda: query_records(
+            args.get("table", ""), args.get("filters"), args.get("limit", 20)
+        ),
         "list_sources": lambda: list_sources(),
         "create_workflow": lambda: create_workflow(args.get("name", ""), args.get("dsl") or {}),
         "run_workflow": lambda: run_workflow(args.get("workflow_id")),
@@ -119,6 +166,76 @@ def execute(name, args):
         return handler()
     except Exception as exc:  # keep the SSE loop alive on tool failure
         return {"error": str(exc)}
+
+
+def create_table(name, columns, dedupe_keys):
+    """Validate and save a DataTable (>=1 column, valid types, dedupe_keys
+    subset of column names). Returns the full table payload so the SSE
+    layer can emit `table_created`."""
+    from crm.models import DataTable
+    from crm.serializers import validate_columns_spec, validate_dedupe_keys_spec
+
+    if not isinstance(name, str) or not name.strip():
+        return {"error": "invalid table", "details": ["'name' must be a non-empty string"]}
+    errors = validate_columns_spec(columns)
+    if not errors:
+        errors.extend(validate_dedupe_keys_spec(dedupe_keys or [], columns))
+    if errors:
+        return {"error": "invalid table", "details": errors}
+
+    table = DataTable.objects.create(
+        name=name.strip(), columns=columns, dedupe_keys=dedupe_keys or []
+    )
+    return {
+        "table_id": table.id,
+        "slug": table.slug,
+        "name": table.name,
+        "columns": table.columns,
+        "dedupe_keys": table.dedupe_keys,
+    }
+
+
+def list_tables():
+    from django.db.models import Count
+
+    from crm.models import DataTable
+
+    tables = DataTable.objects.annotate(n_records=Count("records")).order_by("-created_at")
+    return {
+        "tables": [
+            {
+                "slug": t.slug,
+                "name": t.name,
+                "columns": t.columns,
+                "dedupe_keys": t.dedupe_keys,
+                "record_count": t.n_records,
+            }
+            for t in tables
+        ]
+    }
+
+
+def query_records(table, filters, limit=20):
+    from crm.models import DataTable
+
+    try:
+        target = DataTable.objects.get(slug=table)
+    except DataTable.DoesNotExist:
+        return {"error": f"no table with slug {table!r}"}
+    try:
+        limit = max(1, min(int(limit or 20), 100))
+    except (TypeError, ValueError):
+        limit = 20
+
+    rows = []
+    filters = filters if isinstance(filters, dict) else {}
+    for record in target.records.order_by("-created_at", "-id"):
+        data = record.data or {}
+        if all(str(data.get(k)) == str(v) for k, v in filters.items()):
+            rows.append({"id": record.id, "data": data, "sources": record.sources})
+            if len(rows) >= limit:
+                break
+    return {"count": len(rows), "rows": rows}
 
 
 def list_sources():

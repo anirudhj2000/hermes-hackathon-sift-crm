@@ -34,14 +34,6 @@ def get_client():
 # Shared heuristics (used by the mock, and as fallback by the real client)
 # ---------------------------------------------------------------------------
 
-INTENT_KEYWORDS = [
-    ("pricing", ["pricing", "price", "cost", "quote", "how much", "plan"]),
-    ("demo", ["demo", "walkthrough", "trial"]),
-    ("support", ["support", "issue", "problem", "help", "broken", "bug"]),
-    ("sales", ["buy", "purchase", "interested", "sign up", "upgrade"]),
-]
-
-
 def heuristic_extract(body, columns, context=None):
     """Typed per-column heuristics (v2) — shared with the pipeline extractor."""
     try:
@@ -168,7 +160,7 @@ class HermesClient:
 
 
 # ---------------------------------------------------------------------------
-# Mock client — scripted, demo-worthy transcript
+# Mock client — scripted, demo-worthy transcript (CONTRACTS v2)
 # ---------------------------------------------------------------------------
 
 SOURCE_LABELS = {"whatsapp": "WhatsApp", "gmail": "Gmail"}
@@ -188,58 +180,153 @@ def _registry_sources():
     return {"whatsapp", "gmail"}
 
 
+def _col(name, ctype, description, options=None):
+    col = {"name": name, "type": ctype, "description": description}
+    if options:
+        col["options"] = options
+    return col
+
+
+# Keyword-triggered table designs: (keywords, table name, columns,
+# dedupe_keys, filter instruction). First match wins; leads is the default.
+TABLE_PRESETS = [
+    (
+        ("order", "purchase", "bought", "buying"),
+        "Orders",
+        [
+            _col("order_id", "text", "Stable order reference per buyer"),
+            _col("customer", "text", "Who placed or asked about the order"),
+            _col("item", "text", "Product or plan being ordered"),
+            _col("qty", "number", "Quantity — seats, users, or units"),
+            _col("paid", "bool", "Whether payment is confirmed"),
+        ],
+        ["order_id"],
+        "keep messages that mention an order, purchase, payment, or invoice",
+    ),
+    (
+        ("invoice", "billing", "receipt"),
+        "Invoices",
+        [
+            _col("invoice_id", "text", "Stable invoice reference per customer"),
+            _col("customer", "text", "Billed customer"),
+            _col("company", "text", "Customer's company"),
+            _col("amount", "number", "Invoice amount if mentioned"),
+            _col("paid", "bool", "Whether payment is confirmed"),
+        ],
+        ["invoice_id"],
+        "keep messages about an invoice, billing, or payment",
+    ),
+    (
+        ("support", "issue", "bug", "complaint", "ticket"),
+        "Support Tickets",
+        [
+            _col("ticket_id", "text", "Stable ticket reference per reporter"),
+            _col("customer", "text", "Who reported the issue"),
+            _col("summary", "text", "Short description of the issue"),
+            _col("resolved", "bool", "Whether it was fixed"),
+        ],
+        ["ticket_id"],
+        "keep messages about an issue, bug, error, or something not working",
+    ),
+    (
+        (),  # default: leads / pricing interest
+        "Leads",
+        [
+            _col("person", "text", "Lead's name"),
+            _col("company", "text", "Lead's company"),
+            _col(
+                "intent", "enum", "What they want",
+                options=["pricing", "demo", "trial", "purchase", "partnership"],
+            ),
+            _col("phone", "text", "Contact phone if present"),
+        ],
+        ["person"],
+        "keep messages that ask about pricing, a demo, a trial, or buying",
+    ),
+]
+
+QUESTION_RE = re.compile(
+    r"\bwhat tables\b|\bwhich tables\b|\blist (?:my )?tables\b|\bhow many rows\b"
+)
+
+
 class MockHermesClient:
     """Scripted tool-calling chat. Stateless: the current stage is derived
     from the tool-result messages already present in `messages`, so the
     standard chat loop (execute tool -> append result -> call chat again)
-    just works."""
+    just works.
+
+    v2 script: narrate a plan -> create_table (typed schema + dedupe key)
+    -> create_workflow (v2 DSL targeting the slug the create_table tool
+    RETURNED) -> run_workflow -> closing summary."""
 
     def chat(self, messages, tools):
         user_msg = next(
             (m.get("content") or "" for m in messages if m.get("role") == "user"), ""
         )
-        plan = self._plan(user_msg)
-        sources = plan["sources"]
+        results = self._tool_results(messages)
 
-        created, runs = self._tool_results(messages)
-
-        # Stage 1..n: narrate (first time) and create one workflow per source.
-        if len(created) < len(sources):
-            idx = len(created)
-            source = sources[idx]
-            if idx == 0:
-                yield from self._say(self._opening_narration(plan))
+        # Q&A path: "What tables do I have, and how many rows in each?"
+        if QUESTION_RE.search(user_msg.lower()):
+            if results["tables_listing"] is None:
+                yield from self._say("Let me check your workspace...")
+                yield {"type": "tool_call", "name": "list_tables", "args": {}}
             else:
-                yield from self._say(
-                    f"\n\n{SOURCE_LABELS[source]} workflow next — same shape, "
-                    f"but fetching from {SOURCE_LABELS[source]} instead."
-                )
+                yield from self._say(self._tables_answer(results["tables_listing"]))
+            return
+
+        plan = self._plan(user_msg)
+
+        # Stage 1: design the table schema.
+        if not results["tables"]:
+            yield from self._say(self._opening_narration(plan))
             yield {
                 "type": "tool_call",
-                "name": "create_workflow",
+                "name": "create_table",
                 "args": {
-                    "name": self._workflow_name(source, plan),
-                    "dsl": self._build_dsl(source, plan),
+                    "name": plan["table_name"],
+                    "columns": plan["columns"],
+                    "dedupe_keys": plan["dedupe_keys"],
                 },
             }
             return
 
-        # Stage n+1..2n: kick off a run for each created workflow.
-        if len(runs) < len(created):
-            target = created[len(runs)]
+        table = results["tables"][-1]
+        slug = table.get("slug")
+
+        # Stage 2: build the pipeline against the slug the tool returned.
+        if not results["workflows"]:
             yield from self._say(
-                f"\n\nWorkflow \"{target.get('name', 'workflow')}\" is saved "
-                f"(id {target.get('workflow_id')}). Starting it now..."
+                f'\n\nTable "{table.get("name", slug)}" is ready (slug {slug}). '
+                "Now building the pipeline that fills it..."
+            )
+            yield {
+                "type": "tool_call",
+                "name": "create_workflow",
+                "args": {
+                    "name": self._workflow_name(plan),
+                    "dsl": self._build_dsl(slug, plan),
+                },
+            }
+            return
+
+        workflow = results["workflows"][-1]
+
+        # Stage 3: kick off the first run.
+        if not results["runs"]:
+            yield from self._say(
+                f'\n\nWorkflow "{workflow.get("name", "workflow")}" is saved '
+                f"(id {workflow.get('workflow_id')}). Starting the first run now..."
             )
             yield {
                 "type": "tool_call",
                 "name": "run_workflow",
-                "args": {"workflow_id": target.get("workflow_id")},
+                "args": {"workflow_id": workflow.get("workflow_id")},
             }
             return
 
         # Final stage: closing summary, no more tool calls.
-        yield from self._say(self._closing_summary(plan, created, runs))
+        yield from self._say(self._closing_summary(plan, table, workflow, results["runs"][-1]))
 
     def extract(self, body, columns, context=None):
         return heuristic_extract(body, columns, context)
@@ -261,8 +348,9 @@ class MockHermesClient:
 
     @staticmethod
     def _tool_results(messages):
-        """Split prior tool results into workflow-creation results and run results."""
-        created, runs = [], []
+        """Bucket prior tool results by shape: created tables, created
+        workflows, started runs, list_tables output."""
+        out = {"tables": [], "workflows": [], "runs": [], "tables_listing": None}
         for m in messages:
             if m.get("role") != "tool":
                 continue
@@ -270,16 +358,22 @@ class MockHermesClient:
                 data = json.loads(m.get("content") or "{}")
             except (ValueError, TypeError):
                 continue
-            if "run_id" in data:
-                runs.append(data)
+            if not isinstance(data, dict) or data.get("error"):
+                continue
+            if "table_id" in data:
+                out["tables"].append(data)
             elif "workflow_id" in data:
-                created.append(data)
-        return created, runs
+                out["workflows"].append(data)
+            elif "run_id" in data:
+                out["runs"].append(data)
+            elif "tables" in data:
+                out["tables_listing"] = data
+        return out
 
     @staticmethod
     def _plan(user_msg):
         lower = user_msg.lower()
-        available = _registry_sources()  # only sources declared in the workspace registry
+        available = _registry_sources()  # only sources declared in the registry
         sources = []
         if "whatsapp" in lower and "whatsapp" in available:
             sources.append("whatsapp")
@@ -294,97 +388,106 @@ class MockHermesClient:
         elif "last month" in lower or "past month" in lower or "30 days" in lower:
             since_days = 30
         else:
-            since_days = 7  # "last week" / default
+            since_days = 14  # generous default so fixture history is covered
 
-        tag = None
-        m = re.search(r"tag(?:ging)?\s+(?:the\s+)?([a-z][a-z0-9 -]*?)\s+(?:leads?|contacts?)", lower)
+        # Interval trigger: "every 30 minutes", "every 2 hours", "keep it updated".
+        trigger = "manual"
+        m = re.search(r"every\s+(\d+)\s*(minutes?|mins?|hours?|hrs?)", lower)
         if m:
-            tag = m.group(1).strip().replace(" ", "-")
-        else:
-            for name, kws in INTENT_KEYWORDS:
-                if any(k in lower for k in kws):
-                    tag = f"{name}-lead"  # e.g. "pricing-lead" (matches the demo script)
-                    break
-        return {"sources": sources, "since_days": since_days, "tag": tag}
+            minutes = int(m.group(1)) * (60 if m.group(2).startswith(("hour", "hr")) else 1)
+            trigger = {"type": "interval", "minutes": max(1, minutes)}
+        elif re.search(r"keep (?:it |this |them )?(?:updated|up to date|updating|fresh)|periodically|continuously", lower):
+            trigger = {"type": "interval", "minutes": 30}
 
-    @staticmethod
-    def _topic(plan):
-        """Human-readable topic word for a tag, e.g. 'pricing' for 'pricing-lead'."""
-        tag = plan["tag"] or ""
-        return tag.removesuffix("-lead") or tag
+        keywords_hit = None
+        for keywords, table_name, columns, dedupe_keys, filter_instruction in TABLE_PRESETS:
+            if not keywords or any(k in lower for k in keywords):
+                keywords_hit = (table_name, columns, dedupe_keys, filter_instruction)
+                break
+        table_name, columns, dedupe_keys, filter_instruction = keywords_hit
 
-    @staticmethod
-    def _workflow_name(source, plan):
-        base = f"{SOURCE_LABELS[source]} import ({plan['since_days']}d)"
-        if plan["tag"]:
-            topic = MockHermesClient._topic(plan)
-            base = f"{SOURCE_LABELS[source]} {topic} leads ({plan['since_days']}d)"
-        return base
-
-    @staticmethod
-    def _build_dsl(source, plan):
-        steps = [{"type": "fetch", "source": source, "since_days": plan["since_days"]}]
-        if plan["tag"]:
-            topic = MockHermesClient._topic(plan)
-            steps.append({
-                "type": "filter",
-                "instruction": f"keep messages that mention {topic} or ask about it",
-            })
-        steps.append({
-            "type": "extract",
-            "fields": ["name", "phone", "email", "company", "intent"],
-        })
-        steps.append({
-            "type": "upsert",
-            "dedupe_on": ["phone", "email"],
-            "tag": plan["tag"],
-        })
         return {
-            "name": MockHermesClient._workflow_name(source, plan),
-            "trigger": "manual",
+            "sources": sources,
+            "since_days": since_days,
+            "trigger": trigger,
+            "table_name": table_name,
+            "columns": columns,
+            "dedupe_keys": dedupe_keys,
+            "filter_instruction": filter_instruction,
+        }
+
+    @staticmethod
+    def _workflow_name(plan):
+        labels = " + ".join(SOURCE_LABELS[s] for s in plan["sources"])
+        return f"{plan['table_name']} — {labels} sync ({plan['since_days']}d)"
+
+    @staticmethod
+    def _build_dsl(table_slug, plan):
+        steps = []
+        for source in plan["sources"]:
+            steps.append({"type": "fetch", "source": source, "since_days": plan["since_days"]})
+        steps.append({"type": "filter", "instruction": plan["filter_instruction"]})
+        steps.append({"type": "extract"})
+        steps.append({"type": "upsert", "dedupe_on": plan["dedupe_keys"]})
+        return {
+            "name": MockHermesClient._workflow_name(plan),
+            "trigger": plan["trigger"],
+            "table": table_slug,
             "steps": steps,
         }
+
+    @staticmethod
+    def _trigger_phrase(trigger):
+        if isinstance(trigger, dict):
+            minutes = trigger.get("minutes", 30)
+            if minutes % 60 == 0 and minutes >= 60:
+                hours = minutes // 60
+                return f"re-run automatically every {hours} hour{'s' if hours > 1 else ''}"
+            return f"re-run automatically every {minutes} minutes"
+        return "run on demand"
 
     @staticmethod
     def _opening_narration(plan):
         labels = [SOURCE_LABELS[s] for s in plan["sources"]]
         src_text = " and ".join(labels)
-        parts = [
-            f"Got it. I'll create a workflow that fetches your {src_text} "
-            f"messages from the last {plan['since_days']} days, extracts contact "
-            "details (name, phone, email, company) and intent from each message,"
-        ]
-        if plan["tag"]:
-            parts.append(
-                f" filters for {MockHermesClient._topic(plan)}-related conversations, and creates "
-                f"contacts tagged \"{plan['tag']}\" — deduplicated on phone and email."
-            )
-        else:
-            parts.append(
-                " and creates contacts deduplicated on phone and email."
-            )
-        if len(plan["sources"]) > 1:
-            parts.append(
-                f" Since you mentioned both {labels[0]} and {labels[1]}, "
-                "I'll set up one workflow per source."
-            )
-        parts.append(f"\n\nCreating the {labels[0]} workflow first...")
-        return "".join(parts)
+        col_bits = ", ".join(
+            f"{c['name']} ({c['type']})" for c in plan["columns"]
+        )
+        key_text = ", ".join(plan["dedupe_keys"]) or "none — every message becomes a row"
+        return (
+            f"Got it. I'll design a \"{plan['table_name']}\" table and sift your "
+            f"{src_text} messages from the last {plan['since_days']} days into it.\n\n"
+            f"Schema: {col_bits}. Rows merge on {key_text}, so repeat messages "
+            "update the same row instead of duplicating it. The pipeline will "
+            f"{MockHermesClient._trigger_phrase(plan['trigger'])}.\n\n"
+            "Creating the table first..."
+        )
 
     @staticmethod
-    def _closing_summary(plan, created, runs):
-        lines = ["\n\nAll set! Here's what I did:"]
-        for wf, run in zip(created, runs):
-            lines.append(
-                f"\n- Created workflow \"{wf.get('name', '?')}\" "
-                f"(id {wf.get('workflow_id')}) and started run #{run.get('run_id')}."
+    def _closing_summary(plan, table, workflow, run):
+        schedule = MockHermesClient._trigger_phrase(plan["trigger"])
+        return (
+            "\n\nAll set! Here's what I did:\n"
+            f"- Designed the \"{table.get('name')}\" table ({table.get('slug')}) "
+            f"with {len(table.get('columns') or [])} typed columns.\n"
+            f"- Created workflow \"{workflow.get('name')}\" (id {workflow.get('workflow_id')}) "
+            f"targeting it — it will {schedule}.\n"
+            f"- Started run #{run.get('run_id')}, which is processing in the background.\n\n"
+            "Watch the table fill up on the Tables page — each row carries "
+            "provenance back to the exact source messages."
+        )
+
+    @staticmethod
+    def _tables_answer(listing):
+        tables = listing.get("tables") or []
+        if not tables:
+            return (
+                "You don't have any tables yet. Tell me what you want to track "
+                "— e.g. \"track orders from my WhatsApp chats\" — and I'll design one."
             )
-        tag_note = (
-            f" Matching contacts will be tagged \"{plan['tag']}\"." if plan["tag"] else ""
-        )
-        lines.append(
-            "\n\nThe runs are processing in the background — watch the Runs page "
-            f"for live progress.{tag_note} New contacts will appear in your CRM "
-            "as each run finishes."
-        )
+        lines = [f"You have {len(tables)} table{'s' if len(tables) != 1 else ''}:"]
+        for t in tables:
+            cols = ", ".join(c.get("name", "?") for c in t.get("columns") or [])
+            rows = t.get("record_count", 0)
+            lines.append(f"\n- {t.get('name')} ({t.get('slug')}): {rows} rows — columns: {cols}")
         return "".join(lines)

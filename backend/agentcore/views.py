@@ -11,16 +11,21 @@ from . import tools
 from .hermes_client import get_client
 
 SYSTEM_PROMPT = (
-    "You are the agent inside an agentic CRM. You help the user import "
-    "conversations from WhatsApp and Gmail, build workflows that extract and "
-    "tag contacts, and answer questions about their CRM data. Use the "
-    "available tools: create workflows with valid DSL, then run them. "
-    "WhatsApp is scope-first: workflows can only fetch chats/groups the user "
-    "has scoped on the WhatsApp page — call list_whatsapp_chats to see them, "
-    "and if it is empty ask the user to sync and scope chats there before "
-    "creating WhatsApp workflows. Fetch steps take since_days or a "
-    "from_date/to_date range, and optionally chat_jids from the scoped list. "
-    "Narrate briefly what you are doing."
+    "You are the agent inside Sift, a workspace of user-defined data tables. "
+    "You turn what the user wants to track into a typed table schema "
+    "(create_table: columns with text|number|date|bool|enum types and dedupe "
+    "keys), then build a pipeline that sifts WhatsApp/Gmail messages into "
+    "typed rows (create_workflow with a valid v2 DSL whose 'table' is the "
+    "slug returned by create_table, extract takes NO fields), then run it "
+    "(run_workflow). Use {\"type\": \"interval\", \"minutes\": N} triggers "
+    "when the user wants the table kept up to date. Answer questions about "
+    "existing data with list_tables and query_records. WhatsApp is "
+    "scope-first: workflows can only fetch chats/groups the user has scoped "
+    "on the WhatsApp page — call list_whatsapp_chats to see them, and if it "
+    "is empty ask the user to sync and scope chats there before creating "
+    "WhatsApp workflows. Fetch steps take since_days or a from_date/to_date "
+    "range, and optionally chat_jids from the scoped list. Narrate briefly "
+    "what you are doing."
 )
 
 MAX_TURNS = 12
@@ -108,7 +113,18 @@ def _stream(message, chat_id):
         for call_id, call in executed:
             result = tools.execute(call["name"], call["args"])
 
-            if call["name"] == "create_workflow" and "workflow_id" in result:
+            if call["name"] == "create_table" and "table_id" in result:
+                _attach_table_chat_id(result["table_id"], chat_id)
+                yield _sse("table_created", {
+                    "table": {
+                        "id": result["table_id"],
+                        "slug": result["slug"],
+                        "name": result["name"],
+                        "columns": result["columns"],
+                        "dedupe_keys": result["dedupe_keys"],
+                    }
+                })
+            elif call["name"] == "create_workflow" and "workflow_id" in result:
                 _attach_chat_id(result["workflow_id"], chat_id)
                 yield _sse("workflow_created", {
                     "workflow": {
@@ -137,5 +153,14 @@ def _attach_chat_id(workflow_id, chat_id):
         from crm.models import Workflow
 
         Workflow.objects.filter(pk=workflow_id).update(created_by_chat_id=chat_id)
+    except Exception:
+        pass  # bookkeeping only; never break the stream
+
+
+def _attach_table_chat_id(table_id, chat_id):
+    try:
+        from crm.models import DataTable
+
+        DataTable.objects.filter(pk=table_id).update(created_by_chat_id=chat_id)
     except Exception:
         pass  # bookkeeping only; never break the stream

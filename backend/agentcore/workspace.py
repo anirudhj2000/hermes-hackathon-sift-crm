@@ -142,6 +142,21 @@ def boot_context() -> str:
         reg_lines.append("- (no connectors declared)")
     sections.append("\n".join(reg_lines))
 
+    table_lines = ["## Tables (existing data tables — target these in workflows)"]
+    try:
+        from crm.models import DataTable
+
+        tables = list(DataTable.objects.order_by("created_at"))
+        for t in tables:
+            cols = ", ".join(t.column_names())
+            keys = f" (dedupe: {', '.join(t.dedupe_keys)})" if t.dedupe_keys else ""
+            table_lines.append(f"- {t.slug}: {cols}{keys}")
+        if not tables:
+            table_lines.append("- (none yet — create one with create_table)")
+    except Exception:
+        table_lines.append("- (unavailable)")
+    sections.append("\n".join(table_lines))
+
     wf_lines = ["## Existing workflows (check before creating duplicates)"]
     wf_dir = root / "workflows"
     docs = sorted(wf_dir.glob("*.json")) if wf_dir.is_dir() else []
@@ -189,6 +204,7 @@ def workflow_doc_from_dsl(name: str, dsl: dict, created_by: str = "agent", chat_
         "description": name,
         "requires": requires,
         "trigger": dsl.get("trigger", "manual"),
+        "table": dsl.get("table"),
         "steps": steps,
     }
 
@@ -214,8 +230,11 @@ def validate_workflow_doc(doc, valid_sources=None) -> list[str]:
     description = doc.get("description")
     if not isinstance(description, str) or not description.strip():
         errors.append("'description' must be a non-empty string")
-    if doc.get("trigger") != "manual":
-        errors.append("'trigger' must be \"manual\"")
+    table = doc.get("table")
+    if not isinstance(table, str) or not table.strip():
+        errors.append("'table' must be the slug of the target data table")
+    if doc.get("trigger") != "manual" and not isinstance(doc.get("trigger"), dict):
+        errors.append('\'trigger\' must be "manual" or {"type": "interval", "minutes": int}')
 
     if valid_sources is None:
         valid_sources = get_valid_sources() or set(FALLBACK_SOURCES)
@@ -243,7 +262,12 @@ def validate_workflow_doc(doc, valid_sources=None) -> list[str]:
 
             errors.extend(
                 validate_dsl(
-                    {"name": description or "workflow", "trigger": doc.get("trigger"), "steps": steps},
+                    {
+                        "name": description or "workflow",
+                        "trigger": doc.get("trigger"),
+                        "table": doc.get("table"),
+                        "steps": steps,
+                    },
                     valid_sources=valid_sources,
                 )
             )
@@ -267,6 +291,7 @@ def dsl_from_doc(doc: dict, rel_path: str) -> dict:
     return {
         "name": doc.get("description") or doc.get("id"),
         "trigger": doc.get("trigger", "manual"),
+        "table": doc.get("table"),
         "steps": doc.get("steps") or [],
         "__file": rel_path,
     }
