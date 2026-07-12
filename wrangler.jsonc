@@ -1,0 +1,59 @@
+{
+  // Sift API Worker — fronts the Django container (Stage 1) and, once the R2
+  // auth adapter is done, the Baileys sidecar container (Stage 2).
+  // Deploy:  wrangler deploy   ·   Logs:  wrangler tail
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sift-api",
+  "main": "worker/index.ts",
+  "compatibility_date": "2025-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+
+  "containers": [
+    {
+      "class_name": "DjangoContainer",
+      "image": "./backend/Dockerfile",
+      // Dockerfiles COPY from repo root (backend/…, workspace/…), so the build
+      // context MUST be root — it otherwise defaults to the Dockerfile's dir.
+      "image_build_context": ".",
+      "instance_type": "basic",
+      "max_instances": 1
+    }
+    // ── STAGE 2 · sidecar (uncomment after Stage 1 is green AND the sidecar's
+    //    R2 auth adapter is merged — container disk is ephemeral): ──
+    // ,{
+    //   "class_name": "SidecarContainer",
+    //   "image": "./sidecar/Dockerfile",
+    //   "image_build_context": ".",
+    //   "instance_type": "standard-1",
+    //   "max_instances": 1
+    // }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "DJANGO", "class_name": "DjangoContainer" }
+      // STAGE 2: ,{ "name": "SIDECAR", "class_name": "SidecarContainer" }
+    ]
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["DjangoContainer"] }
+    // STAGE 2 — add a NEW tag, don't edit v1:
+    // ,{ "tag": "v2", "new_sqlite_classes": ["SidecarContainer"] }
+  ],
+
+  // Non-secret vars only. Secrets go via `wrangler secret put <NAME>`:
+  //   DATABASE_URL  HERMES_API_KEY  COMPOSIO_API_KEY  INGEST_SECRET  SIDECAR_SECRET
+  "vars": {
+    "HERMES_BASE_URL": "https://api.openai.com/v1",
+    "HERMES_MODEL": "gpt-5.5",
+    // After the FIRST deploy prints the Worker URL, set this to it and redeploy.
+    // Used for container↔container calls (Django ↔ sidecar) in Stage 2.
+    "PUBLIC_URL": "https://sift-api.example.workers.dev"
+  }
+
+  // ── STAGE 2 · R2 bucket for Baileys auth_state ──
+  // Create first:  wrangler r2 bucket create sift-wa-auth
+  // ,"r2_buckets": [{ "binding": "WA_AUTH", "bucket_name": "sift-wa-auth" }]
+}

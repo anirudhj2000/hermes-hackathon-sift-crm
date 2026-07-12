@@ -21,3 +21,7 @@ sidecar/baileys_auth/
 
 # OS
 .DS_Store
+
+# eval run artifacts
+backend/evals/reports/*.json
+scratchpad-cf-deploy.sh

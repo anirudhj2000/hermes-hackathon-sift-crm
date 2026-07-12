@@ -1,0 +1,10 @@
+# Never bake secrets or local state into images.
+.env
+.git
+**/node_modules
+**/.venv
+frontend/dist
+sidecar/auth_state
+**/__pycache__
+*.pyc
+workspace/runs/*.md

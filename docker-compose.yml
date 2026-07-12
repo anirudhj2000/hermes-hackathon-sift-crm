@@ -1,0 +1,62 @@
+# Sift — full local stack in Docker (de-risk step for Cloudflare Containers).
+#   docker compose up --build
+# Django :8000 · sidecar :3001 · Postgres :5433 (host) — the frontend keeps
+# running via Vite locally (npm run dev) and proxies /api to :8000.
+#
+# Secrets come from ./.env (HERMES_API_KEY, COMPOSIO_API_KEY, ...);
+# container-topology values below override the localhost ones in .env.
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: agentic_crm
+      POSTGRES_USER: sift
+      POSTGRES_PASSWORD: sift
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    ports:
+      - "5433:5432" # host 5433 to avoid clashing with local Homebrew Postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sift -d agentic_crm"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://sift:sift@db:5432/agentic_crm
+      SIDECAR_URL: http://sidecar:3001
+      AGENT_WORKSPACE_ROOT: /workspace
+    volumes:
+      - ./workspace:/workspace # live workspace while iterating locally
+      - ./backend/evals/reports:/app/evals/reports # eval reports for the Evals page
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  sidecar:
+    build:
+      context: .
+      dockerfile: sidecar/Dockerfile
+    environment:
+      INGEST_URL: http://backend:8000/api/ingest/whatsapp
+      INGEST_SECRET: ${INGEST_SECRET:-dev-ingest-secret}
+    volumes:
+      # Fresh session per deployment: pair from the UI on first run and the
+      # initial connection's full history sync populates the store.
+      - wa_auth:/app/auth_state
+    ports:
+      - "3001:3001"
+    depends_on:
+      - backend
+
+volumes:
+  dbdata:
+  wa_auth:
