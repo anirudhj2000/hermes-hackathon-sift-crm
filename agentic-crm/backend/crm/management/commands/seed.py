@@ -59,7 +59,7 @@ WORKFLOW_DSL = {
     "steps": [
         {"type": "fetch", "source": "gmail", "since_days": 7},
         {"type": "filter", "instruction": "keep messages about pricing, quotes, or demo requests"},
-        {"type": "extract", "fields": ["name", "email", "company", "intent"]},
+        {"type": "extract", "fields": ["name", "phone", "email", "company", "intent"]},
         {"type": "upsert", "dedupe_on": ["phone", "email"], "tag": "gmail-import"},
     ],
 }
