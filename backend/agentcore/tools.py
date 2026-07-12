@@ -7,8 +7,6 @@ Exports:
 
 import os
 
-from django.db.models import Count
-
 VALID_STEP_TYPES = {"fetch", "filter", "extract", "upsert"}
 
 TOOL_SCHEMAS = [
@@ -100,20 +98,6 @@ TOOL_SCHEMAS = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "query_crm",
-            "description": "Get simple CRM stats: contact/interaction counts, per-source breakdown, and recently used tags.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "question": {"type": "string", "description": "The user's question about CRM data."},
-                },
-                "required": ["question"],
-            },
-        },
-    },
 ]
 
 
@@ -127,7 +111,6 @@ def execute(name, args):
         "list_files": lambda: list_files(args.get("path", "")),
         "read_file": lambda: read_file(args.get("path", "")),
         "write_file": lambda: write_file(args.get("path", ""), args.get("content", "")),
-        "query_crm": lambda: query_crm(args.get("question", "")),
     }
     handler = handlers.get(name)
     if handler is None:
@@ -316,23 +299,3 @@ def list_whatsapp_chats():
     }
 
 
-def query_crm(question):
-    from crm.models import Contact, Interaction
-
-    by_source = {
-        row["source"]: row["n"]
-        for row in Interaction.objects.values("source").annotate(n=Count("id"))
-    }
-    recent_tags = []
-    for contact in Contact.objects.order_by("-created_at")[:50]:
-        for tag in contact.tags or []:
-            if tag not in recent_tags:
-                recent_tags.append(tag)
-        if len(recent_tags) >= 10:
-            break
-    return {
-        "contacts": Contact.objects.count(),
-        "interactions": Interaction.objects.count(),
-        "by_source": by_source,
-        "recent_tags": recent_tags[:10],
-    }

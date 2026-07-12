@@ -1,51 +1,50 @@
 from django.conf import settings
-from django.db.models import Count, Max, Q
+from django.db.models import Count
 from rest_framework import mixins, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from .models import Connection, Contact, Interaction, Workflow, WorkflowRun
+from .models import Connection, DataTable, Workflow, WorkflowRun
 from .serializers import (
     ConnectionSerializer,
-    ContactDetailSerializer,
-    ContactListSerializer,
-    InteractionSerializer,
+    RecordSerializer,
+    TableSerializer,
     WorkflowRunSerializer,
     WorkflowSerializer,
 )
 
+RECORDS_MAX = 500
 
-class ContactViewSet(viewsets.ReadOnlyModelViewSet):
+
+class TableViewSet(
+    mixins.ListModelMixin,
+    mixins.RetrieveModelMixin,
+    mixins.CreateModelMixin,
+    viewsets.GenericViewSet,
+):
+    serializer_class = TableSerializer
+    lookup_field = "slug"
+
     def get_queryset(self):
-        qs = Contact.objects.annotate(
-            interaction_count=Count("interactions"),
-            last_ts=Max("interactions__ts"),
-        ).order_by("-created_at")
-        search = self.request.query_params.get("search")
+        return DataTable.objects.annotate(record_count=Count("records")).order_by("-created_at")
+
+    @action(detail=True, methods=["get"])
+    def records(self, request, slug=None):
+        """Newest-first records; ?search= icontains across data values."""
+        table = self.get_object()
+        rows = list(table.records.order_by("-created_at", "-id")[:RECORDS_MAX])
+        search = (request.query_params.get("search") or "").strip().lower()
         if search:
-            qs = qs.filter(
-                Q(name__icontains=search)
-                | Q(email__icontains=search)
-                | Q(phone__icontains=search)
-                | Q(company__icontains=search)
-            )
-        return qs
-
-    def get_serializer_class(self):
-        if self.action == "retrieve":
-            return ContactDetailSerializer
-        return ContactListSerializer
-
-
-class InteractionViewSet(viewsets.ReadOnlyModelViewSet):
-    serializer_class = InteractionSerializer
-
-    def get_queryset(self):
-        qs = Interaction.objects.order_by("-ts")
-        contact = self.request.query_params.get("contact")
-        if contact:
-            qs = qs.filter(contact_id=contact)
-        return qs
+            rows = [
+                r
+                for r in rows
+                if any(
+                    search in str(value).lower()
+                    for value in (r.data or {}).values()
+                    if value is not None
+                )
+            ]
+        return Response(RecordSerializer(rows, many=True).data)
 
 
 class WorkflowViewSet(

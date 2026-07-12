@@ -1,42 +1,55 @@
 from django.db import models
+from django.utils.text import slugify
+
+COLUMN_TYPES = ("text", "number", "date", "bool", "enum")
 
 
-class Contact(models.Model):
+class DataTable(models.Model):
+    """A user-defined table designed by the agent in chat (CONTRACTS v2).
+
+    `columns` is a list of {"name", "type": text|number|date|bool|enum,
+    "description", "options"?}; `dedupe_keys` is a subset of column names.
+    """
+
     name = models.CharField(max_length=255)
-    phone = models.CharField(max_length=64, null=True, blank=True)
-    email = models.CharField(max_length=255, null=True, blank=True)
-    company = models.CharField(max_length=255, null=True, blank=True)
-    tags = models.JSONField(default=list, blank=True)
+    slug = models.SlugField(max_length=255, unique=True, blank=True)
+    columns = models.JSONField(default=list)
+    dedupe_keys = models.JSONField(default=list, blank=True)
+    created_by_chat_id = models.CharField(max_length=255, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            base = slugify(self.name)[:240] or "table"
+            slug = base
+            suffix = 2
+            while DataTable.objects.filter(slug=slug).exclude(pk=self.pk).exists():
+                slug = f"{base}-{suffix}"
+                suffix += 1
+            self.slug = slug
+        super().save(*args, **kwargs)
+
+    def column_names(self):
+        return [c.get("name") for c in (self.columns or []) if isinstance(c, dict)]
+
     def __str__(self):
-        return self.name
+        return f"{self.name} ({self.slug})"
 
 
-class Interaction(models.Model):
-    SOURCE_CHOICES = [("whatsapp", "whatsapp"), ("gmail", "gmail")]
-    DIRECTION_CHOICES = [("in", "in"), ("out", "out")]
+class Record(models.Model):
+    """A typed row in a DataTable with source provenance."""
 
-    contact = models.ForeignKey(
-        Contact,
-        on_delete=models.CASCADE,
-        null=True,
-        blank=True,
-        related_name="interactions",
-    )
-    source = models.CharField(max_length=16, choices=SOURCE_CHOICES)
-    external_id = models.CharField(max_length=255)
-    direction = models.CharField(max_length=8, choices=DIRECTION_CHOICES)
-    body = models.TextField()
-    ts = models.DateTimeField()
-    extracted = models.JSONField(default=dict, blank=True)
+    table = models.ForeignKey(DataTable, on_delete=models.CASCADE, related_name="records")
+    data = models.JSONField(default=dict)
+    sources = models.JSONField(default=list)  # [{"source", "external_id", "ts"?}]
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        unique_together = [("source", "external_id")]
-        ordering = ["-ts"]
+        ordering = ["-created_at", "-id"]
 
     def __str__(self):
-        return f"{self.source}:{self.external_id}"
+        return f"record {self.pk} in {self.table.slug}"
 
 
 class Connection(models.Model):

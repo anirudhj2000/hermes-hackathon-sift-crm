@@ -45,8 +45,9 @@ def list_chats(request):
     chats = WaChat.objects.annotate(n_messages=Count("messages")).order_by(
         "-scoped", "-last_message_at"
     )
+    # Bare list — the frontend consumes an array (or DRF-style {results: []}).
     return JsonResponse(
-        {"chats": [_chat_dict(c, message_count=c.n_messages) for c in chats]}
+        [_chat_dict(c, message_count=c.n_messages) for c in chats], safe=False
     )
 
 
