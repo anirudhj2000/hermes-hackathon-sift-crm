@@ -6,8 +6,8 @@ POST /api/ingest/whatsapp
   reply   {"created": int, "skipped": int}
 
 v2: messages land in the persistent WaChat/WaMessage store (groups
-included — the sidecar no longer filters them out). CRM Interactions are
-NOT created here; workflows create them from *scoped* chats only.
+included — the sidecar no longer filters them out). Table Records are
+NOT created here; workflows sift rows out of *scoped* chats only.
 """
 
 import json
